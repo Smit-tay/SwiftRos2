@@ -1,0 +1,29 @@
+Panels:
+  - Class: rviz/Displays
+    Expand: true
+    Displays:
+      - Class: rviz/RobotModel
+        Name: RobotModel
+        RobotDescription: /robot_description
+        TFPrefix: ''
+        ShowAxis: true
+        AxisLength: 0.2
+        Color: 0.588 0.588 0.588 1.0
+        Alpha: 1.0
+        UseURDF: true
+        ShowWireframe: false
+      - Class: rviz/TF
+        Name: TF
+        Enabled: true
+        ShowAxes: true
+        ShowFrames: true
+        ShowNames: false
+        ShowArrows: true
+        ArrowLength: 0.2
+        ArrowRadius: 0.01
+      - Class: rviz/JointState
+        Name: JointState
+        Enabled: true
+        Topic: /uarm/joint_states
+        DisplayType: Marker
+    AutoStart: true
