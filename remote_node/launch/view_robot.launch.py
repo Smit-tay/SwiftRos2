@@ -28,11 +28,21 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Launch RViz to visualize the robot
+    rviz_config_file = os.path.join(package_path, 'rviz', 'uarm_config.rviz')  # Make sure this path is correct
+    rviz = launch_ros.actions.Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config_file],
+        output='screen'
+    )
+
     # Ensure Robot State Publisher starts only after Xacro finishes
     start_robot_state_publisher = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=generate_urdf,
-            on_exit=[robot_state_publisher]
+            on_exit=[robot_state_publisher, rviz]
         )
     )
 

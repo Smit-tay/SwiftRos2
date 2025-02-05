@@ -12,7 +12,7 @@ find_package(ros2_controllers REQUIRED)
 find_package(robot_state_publisher REQUIRED)
 
 # Add executable
-add_executable(controller_node src/uarm_controller.cpp)
+add_executable(controller_node src/swiftpro_controller.cpp)
 
 # Link libraries
 ament_target_dependencies(controller_node

@@ -3,8 +3,8 @@
 
 class UArmController : public rclcpp::Node {
  public:
-  UArmController() : Node("uarm_controller") {
-    RCLCPP_INFO(this->get_logger(), "uArm Controller Node Started");
+  UArmController() : Node("swiftpro_controller") {
+    RCLCPP_INFO(this->get_logger(), "uArm SwiftPro Controller Node Started");
 
     // Example subscription (e.g., to receive movement commands)
     subscription_ = this->create_subscription<std_msgs::msg::String>(
@@ -14,12 +14,12 @@ class UArmController : public rclcpp::Node {
         });
 
     // Example publisher (e.g., to publish uArm state)
-    publisher_ = this->create_publisher<std_msgs::msg::String>("uarm/state", 10);
+    publisher_ = this->create_publisher<std_msgs::msg::String>("swiftpro/state", 10);
 
     // Timer to publish state periodically
     timer_ = this->create_wall_timer(std::chrono::seconds(1), [this]() {
       auto message = std_msgs::msg::String();
-      message.data = "uArm is operational";
+      message.data = "uArm SwiftPro is operational";
       publisher_->publish(message);
     });
   }
