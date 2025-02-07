@@ -9,11 +9,6 @@ ROS 2 Exploration with a UArm Swift Pro  by [UFACTORY](https://www.ufactory.cc/)
   - [Step 1: Use the F***ing Container](#step-1-use-the-fing-container)
   - [Docker Container Installation](#docker-container-installation)
 - [Test the Basics](#test-the-basics)
-- [Troubleshooting](#troubleshooting)
-  - [libfranka: UDP receive: Timeout error](#libfranka-udp-receive-timeout-error)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
 
 # About  
 This project is designed to provide a fundamental understanding of **ROS 2's** core features and design paradigms.  Much of this project may be used without a physical robot.  BUT, to really "grok" what we're doing a real robot is helpful.
@@ -51,9 +46,10 @@ This setup allows you to develop in an isolated, controlled environment with all
 For reference, this container approach is inspired by the genius work found here: [ssilenzi/devcontainer-humble-ros-base](https://github.com/ssilenzi/devcontainer-humble-ros-base).  
 
 ## Docker Container Installation
-Please see this outstanding reference, for a general understandng of how to set up a Docker container in various manners.
+Please see this outstanding reference, for a general understandng of how to set up a Docker container.
+I am sure you can translate those instructions to this project quite easily.
 
-[Franka Robotics - franks_ros2/README.md](https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#setup)
+[Franka Robotics - franks_ros2/README.md](https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#docker-container-installation)
 
 # Build the project
 Once your environment is set up properly (probably within a running container), you will need to perform a build.
