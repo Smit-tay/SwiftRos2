@@ -39,16 +39,25 @@ ament_target_dependencies(remote_node
 install(TARGETS remote_node
   DESTINATION lib/${PROJECT_NAME}
 )
-# Install launch files
-install(
-  DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-)
+
 # Install the URDF/Xacro files
 install(
-  DIRECTORY urdf/
-  DESTINATION share/${PROJECT_NAME}/urdf
+  DIRECTORY urdf
+  DESTINATION share/${PROJECT_NAME}
 )
+
+# Install launch files
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# Install the rviz configuration file
+install(
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
 
 # Export package dependencies
 ament_package()
