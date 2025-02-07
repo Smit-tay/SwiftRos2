@@ -49,7 +49,7 @@ For reference, this container approach is inspired by the genius work found here
 Please see this outstanding reference, for a general understandng of how to set up a Docker container.
 I am sure you can translate those instructions to this project quite easily.
 
-[Franka Robotics - franks_ros2/README.md]([https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#setup](https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#docker-container-installation))
+[Franka Robotics - franks_ros2/README.md](https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#setup](https://github.com/frankaemika/franka_ros2?tab=readme-ov-file#docker-container-installation)
 
 # Build the project
 Once your environment is set up properly (probably within a running container), you will need to perform a build.
