@@ -9,11 +9,6 @@ ROS 2 Exploration with a UArm Swift Pro  by [UFACTORY](https://www.ufactory.cc/)
   - [Step 1: Use the F***ing Container](#step-1-use-the-fing-container)
   - [Docker Container Installation](#docker-container-installation)
 - [Test the Basics](#test-the-basics)
-- [Troubleshooting](#troubleshooting)
-  - [libfranka: UDP receive: Timeout error](#libfranka-udp-receive-timeout-error)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
 
 # About  
 This project is designed to provide a fundamental understanding of **ROS 2's** core features and design paradigms.  Much of this project may be used without a physical robot.  BUT, to really "grok" what we're doing a real robot is helpful.
