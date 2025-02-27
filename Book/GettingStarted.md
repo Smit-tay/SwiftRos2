@@ -26,6 +26,11 @@ Once your environment is set up properly (probably within a running container), 
 This is quite simple, using the following commands:
 
 ```
+# Perform the ros2 dependency detection and installation
+rosdep install --from-paths src --ignore-src --rosdistro humble -y
+```
+
+```
 # Source the ros environment
 source /opt/ros/humble/setup.bash
 ```
@@ -57,9 +62,9 @@ Because writing raw **URDF** would apparently be too straightforward, ROS has **
 - We use a **Xacro file** to construct a [URDF file](http://wiki.ros.org/urdf/XML/model) that describes the robot’s structure:  
   - **Links**: Define rigid bodies with mass, visual features, and collision properties.  
   - **Joints**: Define how links connect and move relative to each other.  
-- The **Xacro file** (`src/remote_node/urdf/swiftpro.xacro`) references multiple [STL files](https://en.wikipedia.org/wiki/STL_(file_format)) for precise shape descriptions.  
+- The **Xacro file** (`src/resources/urdf/swiftpro.xacro`) references multiple [STL files](https://en.wikipedia.org/wiki/STL_(file_format)) for precise shape descriptions.  
 - The `xacro` command processes all these references and **generates a complete URDF file**.  
-- This happens automatically at build time via CMake (`src/remote_node/CMakeLists.txt`).  
+- This happens automatically at build time via CMake (`src/resources/urdf/CMakeLists.txt`).  
 
 At the end of all this, we get a **URDF file**, which is basically just the fully expanded version of the **Xacro file**—a process that *definitely* doesn’t add unnecessary complexity (except when it does).  
 
@@ -67,7 +72,7 @@ This modularity is great for tweaking shapes, colors, or adding dynamic elements
 
 ## Now That We Have a URDF, Let’s Actually Use It  
 
-We provide a **ROS 2 launch file**:  `src/remote_node/launch/view_robot_urdf.launch.py`
+We provide a **ROS 2 launch file**:  `src/resources/launch/view_robot_urdf.launch.py`
 
 Because manually starting every single ROS 2 component one by one would be far too annoying, **launch files** help orchestrate everything into a single command.  
 
@@ -85,7 +90,7 @@ Because manually starting every single ROS 2 component one by one would be far t
 
      _Necessity of this node:_ Although it might seem like an extra step, this node is necessary because it handles the processing of the robot’s description and transforms it into a format that can be used by other parts of the system, like robot_state_publisher and RViz.
 
-   - **Launches `RViz` with a predefined config**  `src/remote_node/config/swiftpro.rviz`
+   - **Launches `RViz` with a predefined config**  `src/resources/visualizer_config/swiftpro.rviz`
 
      _Loading the RobotModel plugin:_ The configuration specifies that the Robot Model plugin is loaded, subscribes to the /joint_states topic from joint_state_publisher and /robot_description from robot_state_publisher, then updates the visualization of the robot based on these inputs.  
 
@@ -94,13 +99,16 @@ Because manually starting every single ROS 2 component one by one would be far t
 ### Running the Launch File  
 
 ```bash
-ros2 launch remote_node view_robot_urdf.launch.py
+# Make sure to set the local environment
+source install/setup.bash
+# Then run the visualizer
+ros2 launch swiftpro_resources view_robot_urdf.launch.py
 ```
 
 Hopefully you are able to see something like this (click image to enlarge):  
 
-<a href="InTheBeginning.png">
-  <img src="InTheBeginning.png" width="500" />
+<a href="assets/images/InTheBeginning.png">
+  <img src="assets/images/InTheBeginning.png" width="500" />
 </a>
 
 If you play around with the Joint settings on the Joint State Broadcaster GUI, you'll notice a problem.
@@ -145,7 +153,7 @@ While parallel linkage mechanisms are more complex to model, they do offer some 
 We would like to be able to properly visualize the Swift Pro. We could choose another visualizer, possibly Gazebo, or something even more sophisticated, but, then we wouldn't really learn much.  We could edit the XACRO file, adding in `mimic` joint entries - which you are encouraged to try - but, this **_still_** won't solve the issue properly, since `mimic` joints won't behave exactly as we need them to (i.e. correctly).
 
 Example:
-```bash
+```xml
 <joint name="Joint5" type="revolute">
 	<axis xyz="0 1 0"/>
 	<limit effort = "1000.0" lower = "-3" upper = "3" velocity = "0" />
