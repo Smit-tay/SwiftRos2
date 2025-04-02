@@ -1,91 +1,104 @@
-#include <geometry_msgs/msg/point.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <string>
+#include <vector>
 
-class KinematicsNode : public rclcpp::Node {
- public:
-  KinematicsNode() : Node("kinematics_node") {
-    // Subscribe to raw joint states
-    joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        "/joint_states", 10,
-        std::bind(&KinematicsNode::jointStateCallback, this, std::placeholders::_1));
+class SwiftProKinematics : public rclcpp::Node {
+public:
+    SwiftProKinematics() : Node("swiftpro_kinematics") {
+        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+        joint_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+            "joint_states", 10,
+            std::bind(&SwiftProKinematics::jointCallback, this, std::placeholders::_1));
 
-    // Publish corrected joint states
-    joint_pub_ =
-        this->create_publisher<sensor_msgs::msg::JointState>("/corrected_joint_states", 10);
-  }
+        RCLCPP_INFO(this->get_logger(), "SwiftPro Kinematics Node started in namespace: %s", this->get_namespace());
+    }
 
- private:
-  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    dumpJointState(msg);
+private:
+    void jointCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+        // Get joint positions
+        double joint1_pos = getJointPosition(msg, "Joint1");
+        double joint2_pos = getJointPosition(msg, "Joint2");
+        double joint3_pos = getJointPosition(msg, "Joint3");
+        double joint4_pos = getJointPosition(msg, "Joint4");
+        double joint5_pos = getJointPosition(msg, "Joint5");
 
-    auto corrected_msg = *msg;
-    /*
-        // Find Joint2 and apply corrections to Joint5 and Joint6
-        for (size_t i = 0; i < msg->name.size(); ++i) {
-          if (msg->name[i] == "joint2") {
-            double joint2_angle = msg->position[i];
-
-            // Apply a simple offset for the parallel linkage
-            for (size_t j = 0; j < msg->name.size(); ++j) {
-              if (msg->name[j] == "joint5") {
-                corrected_msg.position[j] = joint2_angle + 0.01;  // Example 1cm offset
-              } else if (msg->name[j] == "joint6") {
-                corrected_msg.position[j] = joint2_angle + 0.01;
-              }
-            }
-            break;
-          }
+        // Parallelogram: Link4 stays level, Joint5 mirrors Joint4 inversely
+        double expected_joint5_pos = -joint4_pos;  // Adjust based on SwiftPro
+        if (std::abs(joint5_pos - expected_joint5_pos) > 0.01) {
+            joint5_pos = expected_joint5_pos;
+            RCLCPP_DEBUG(this->get_logger(), "Adjusted Joint5 to %f to match Joint4", joint5_pos);
         }
-        */
-    joint_pub_->publish(corrected_msg);
-  }
 
-  void dumpJointState(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    RCLCPP_INFO(this->get_logger(), "Received JointState message:");
+        // Base transforms
+        publishTransform("Base", "Link1", 0.0, 0.0, 0.0723, 0.0, 0.0, joint1_pos);  // Joint1 (z-axis)
 
-    // Print header (timestamp and frame_id)
-    RCLCPP_INFO(this->get_logger(), "  Header:");
-    RCLCPP_INFO(this->get_logger(), "    Stamp: %u.%09u", msg->header.stamp.sec,
-                msg->header.stamp.nanosec);
-    RCLCPP_INFO(this->get_logger(), "    Frame ID: %s", msg->header.frame_id.c_str());
+        // Parallelogram transforms
+        publishTransform("Link1", "Link2", 0.0132, 0.0, 0.0333, 0.0, joint2_pos, 0.0);  // Joint2
+        publishTransform("Link2", "Link4", 0.0, 0.0, 0.14207, 0.0, joint4_pos, 0.0);  // Joint4 (Link4-A)
+        publishTransform("Link1", "Link5", -0.0215, 0.0, 0.05001, 0.0, joint5_pos, 0.0);  // Joint5
 
-    // Print joint names
-    RCLCPP_INFO(this->get_logger(), "  Joint Names:");
-    for (size_t i = 0; i < msg->name.size(); i++) {
-      RCLCPP_INFO(this->get_logger(), "    [%zu]: %s", i, msg->name[i].c_str());
+        // Link4 (A) to Link4 (B) - triangle’s upper rear, approximate length
+        double link4_a_to_b_x = 0.0375;  // Tune: distance from A to B
+        double link4_a_to_b_z = 0.0275;  // Tune: height difference
+        publishTransform("Link4", "Link4_B", link4_a_to_b_x, 0.0, link4_a_to_b_z, 0.0, 0.0, 0.0);
+
+        // Link4 (B) to Link5 - closes the parallelogram
+        double link4_b_to_link5_x = -0.03;  // Tune: back from B to Link5’s end
+        publishTransform("Link4_B", "Link5", link4_b_to_link5_x, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+        // Link4 (A) to Link4 (C) - triangle’s upper forward
+        double link4_a_to_c_x = 0.0375;  // Tune: distance from A to C
+        double link4_a_to_c_z = 0.0275;  // Tune: height difference
+        publishTransform("Link4", "Link4_C", link4_a_to_c_x, 0.0, link4_a_to_c_z, 0.0, 0.0, 0.0);
+
+        // End effector: Link4 (C) -> Link9 -> Link8 (fixing Xacro’s Link3 -> Link8)
+        publishTransform("Link4_C", "Link9", 0.0, 0.0, 0.0, 0.0, joint3_pos, 0.0);  // Joint3 moves Link9
+        publishTransform("Link9", "Link8", 0.02741, 0.0, 0.02703, 0.0, getJointPosition(msg, "Joint9"), 0.0);  // Joint9 moves Link8
+
+        // Wrist (Link6, Link7)
+        publishTransform("Link1", "Link6", 0.0132, 0.0, 0.0333, 0.0, getJointPosition(msg, "Joint6"), 0.0);  // Joint6
+        publishTransform("Link6", "Link7", -0.0455, 0.0, -0.00301, 0.0, getJointPosition(msg, "Joint7"), 0.0);  // Joint7
     }
 
-    // Print positions
-    RCLCPP_INFO(this->get_logger(), "  Joint Positions:");
-    for (size_t i = 0; i < msg->position.size(); i++) {
-      RCLCPP_INFO(this->get_logger(), "    [%zu]: %f", i, msg->position[i]);
+    double getJointPosition(const sensor_msgs::msg::JointState::SharedPtr msg, const std::string& joint_name) {
+        auto it = std::find(msg->name.begin(), msg->name.end(), joint_name);
+        if (it == msg->name.end()) {
+            RCLCPP_WARN_ONCE(this->get_logger(), "%s not found in joint states.", joint_name.c_str());
+            return 0.0;
+        }
+        return msg->position[std::distance(msg->name.begin(), it)];
     }
 
-    // Print velocities (if available)
-    if (!msg->velocity.empty()) {
-      RCLCPP_INFO(this->get_logger(), "  Joint Velocities:");
-      for (size_t i = 0; i < msg->velocity.size(); i++) {
-        RCLCPP_INFO(this->get_logger(), "    [%zu]: %f", i, msg->velocity[i]);
-      }
+    void publishTransform(const std::string& parent, const std::string& child, 
+                          double x, double y, double z, double roll, double pitch, double yaw) {
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = this->now();
+        t.header.frame_id = parent;
+        t.child_frame_id = child;
+        t.transform.translation.x = x;
+        t.transform.translation.y = y;
+        t.transform.translation.z = z;
+        tf2::Quaternion q;
+        q.setRPY(roll, pitch, yaw);
+        t.transform.rotation.x = q.x();
+        t.transform.rotation.y = q.y();
+        t.transform.rotation.z = q.z();
+        t.transform.rotation.w = q.w();
+        tf_broadcaster_->sendTransform(t);
     }
 
-    // Print efforts (if available)
-    if (!msg->effort.empty()) {
-      RCLCPP_INFO(this->get_logger(), "  Joint Efforts:");
-      for (size_t i = 0; i < msg->effort.size(); i++) {
-        RCLCPP_INFO(this->get_logger(), "    [%zu]: %f", i, msg->effort[i]);
-      }
-    }
-  }
-
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 };
 
-int main(int argc, char* argv[]) {
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<KinematicsNode>());
-  rclcpp::shutdown();
-  return 0;
+int main(int argc, char *argv[]) {
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<SwiftProKinematics>();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
+    return 0;
 }
