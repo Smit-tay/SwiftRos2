@@ -27,12 +27,12 @@ This is quite simple, using the following commands:
 
 ```
 # Perform the ros2 dependency detection and installation
-rosdep install --from-paths src --ignore-src --rosdistro humble -y
+rosdep install --from-paths src --ignore-src -y
 ```
 
 ```
 # Source the ros environment
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 ```
 
 ```
