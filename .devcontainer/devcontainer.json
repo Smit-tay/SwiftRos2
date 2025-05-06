@@ -1,11 +1,11 @@
 {
     "name": "ROS 2 UArm Swift Pro Development Container",
     "privileged": true,
-    "remoteUser": "user",
+    "remoteUser": "${localEnv:USER}",
     "dockerComposeFile": "../docker-compose.yml",
     "service": "swiftpro_ros",
     "workspaceFolder": "/swiftros_ws",
-    "initializeCommand": "echo \"USER_UID=$(id -u $USER)\nUSER_GID=$(id -g $USER)\" > .env",
+    "initializeCommand": "echo -e \"UID=$(id -u)\nGID=$(id -g)\nUSERNAME=$(whoami)\" > .env",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -18,12 +18,12 @@
             ],
             "settings": {
                 "python.analysis.extraPaths": [
-                    "/opt/ros/humble/lib/python3.10/site-packages",
-                    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+                    "/opt/ros/jazzy/lib/python3.12/site-packages",
+                    "/opt/ros/jazzy/local/lib/python3.12/dist-packages"
                 ],
                 "python.autoComplete.extraPaths": [
-                    "/opt/ros/humble/lib/python3.10/site-packages",
-                    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+                    "/opt/ros/jazzy/lib/python3.12/site-packages",
+                    "/opt/ros/jazzy/local/lib/python3.12/dist-packages"
                 ],
                 "terminal.integrated.defaultProfile.linux": "bash",
                 "terminal.integrated.profiles.linux": {

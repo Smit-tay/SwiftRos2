@@ -1,19 +1,19 @@
-# Start with an official ROS 2 base image for the desired distribution
-FROM ros:humble-ros-base
+# Start with an official ROS 2 base image for Jazzy Jalisco
+FROM ros:jazzy-ros-base
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    ROS_DISTRO=humble
+    ROS_DISTRO=jazzy
 
-ARG USER_UID=1001
-ARG USER_GID=1001
+# Define build arguments for host UID, GID, and username with defaults
+ARG HOST_UID=1000
+ARG HOST_GID=1000
 ARG USERNAME=user
 
 # Install essential packages and ROS development tools
-RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     bash-completion \
     curl \
@@ -25,59 +25,70 @@ RUN --mount=type=cache,target=/var/cache/apt \
     python3-colcon-common-extensions \
     sudo \
     vim \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /swiftros_ws
 
 # Setup user configuration
-RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
-    && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-    && echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /home/$USERNAME/.bashrc \
-    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /home/$USERNAME/.bashrc \
-    && chown $USERNAME:$USERNAME /swiftros_ws
+# Create or rename group and user, handle existing UID/GID conflicts
+RUN echo "Configuring group with GID=$HOST_GID for $USERNAME" && \
+    (getent group $HOST_GID && groupmod -n $USERNAME $(getent group $HOST_GID | cut -d: -f1) || groupadd --gid $HOST_GID $USERNAME) && \
+    echo "Configuring user $USERNAME with UID=$HOST_UID, GID=$HOST_GID" && \
+    (id -u $HOST_UID >/dev/null 2>&1 && \
+     echo "UID $HOST_UID exists, updating user" && \
+     usermod -l $USERNAME -d /home/$USERNAME -m -g $HOST_GID $(id -un $HOST_UID) || \
+     useradd --uid $HOST_UID --gid $HOST_GID -m -s /bin/bash $USERNAME) && \
+    echo "Configuring sudo and bashrc for $USERNAME" && \
+    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME && \
+    chmod 0440 /etc/sudoers.d/$USERNAME && \
+    echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /home/$USERNAME/.bashrc && \
+    echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /home/$USERNAME/.bashrc && \
+    echo "Setting ownership of /swiftros_ws to $USERNAME:$HOST_GID" && \
+    chown -R $USERNAME:$HOST_GID /swiftros_ws && \
+    echo "User setup complete: $(id $USERNAME)"
+
 
 USER $USERNAME
 
-# Install some ROS 2 dependencies to create a cache layer
-RUN sudo apt-get update \
-    && sudo apt-get install -y --no-install-recommends \
-    ros-humble-ros-gz \
-    ros-humble-sdformat-urdf \
-    ros-humble-joint-state-publisher-gui \
-    ros-humble-ros2controlcli \
-    ros-humble-controller-interface \
-    ros-humble-ament-cmake-clang-format \
-    ros-humble-ament-cmake-clang-tidy \
-    ros-humble-controller-manager \
-    ros-humble-ros2-control-test-assets \
-    ros-humble-hardware-interface \
-    ros-humble-control-msgs \
-    ros-humble-generate-parameter-library \
-    ros-humble-realtime-tools \
-    ros-humble-joint-state-publisher \
-    ros-humble-joint-state-broadcaster \
-    ros-humble-moveit-ros-move-group \
-    ros-humble-moveit-kinematics \
-    ros-humble-moveit-planners-ompl \
-    ros-humble-moveit-ros-visualization \
-    ros-humble-joint-trajectory-controller \
-    ros-humble-moveit-simple-controller-manager \
-    ros-humble-rviz2 \
-    ros-humble-xacro \
-    && sudo apt-get clean \
-    && sudo rm -rf /var/lib/apt/lists/*
+# Install ROS 2 dependencies
+RUN sudo apt-get update && \
+    sudo apt-get install -y --no-install-recommends \
+    ros-jazzy-ros-gz \
+    ros-jazzy-sdformat-urdf \
+    ros-jazzy-joint-state-publisher-gui \
+    ros-jazzy-ros2controlcli \
+    ros-jazzy-controller-interface \
+    ros-jazzy-ament-cmake-clang-format \
+    ros-jazzy-ament-cmake-clang-tidy \
+    ros-jazzy-controller-manager \
+    ros-jazzy-ros2-control-test-assets \
+    ros-jazzy-hardware-interface \
+    ros-jazzy-control-msgs \
+    ros-jazzy-generate-parameter-library \
+    ros-jazzy-realtime-tools \
+    ros-jazzy-joint-state-publisher \
+    ros-jazzy-joint-state-broadcaster \
+    ros-jazzy-moveit-ros-move-group \
+    ros-jazzy-moveit-kinematics \
+    ros-jazzy-moveit-planners-ompl \
+    ros-jazzy-moveit-ros-visualization \
+    ros-jazzy-joint-trajectory-controller \
+    ros-jazzy-moveit-simple-controller-manager \
+    ros-jazzy-rviz2 \
+    ros-jazzy-xacro \
+    && sudo apt-get clean && \
+    sudo rm -rf /var/lib/apt/lists/*
 
-# Install the missing ROS 2 dependencies
+# Install missing ROS 2 dependencies
 COPY . /swiftros_ws/src
-RUN sudo chown -R $USERNAME:$USERNAME /swiftros_ws \
-    && sudo apt-get update \
-    && rosdep update \
-    && rosdep install --from-paths src --ignore-src --rosdistro $ROS_DISTRO -y \
-    && sudo apt-get clean \
-    && sudo rm -rf /var/lib/apt/lists/* \
-    && rm -rf /home/$USERNAME/.ros 
+RUN sudo chown -R $USERNAME:$USERNAME /swiftros_ws && \
+    sudo apt-get update && \
+    rosdep update && \
+    rosdep install --from-paths src --ignore-src --rosdistro $ROS_DISTRO -y && \
+    sudo apt-get clean && \
+    sudo rm -rf /var/lib/apt/lists/* && \
+    rm -rf /home/$USERNAME/.ros 
 
 # Set the default shell to bash and the workdir to the source directory
 SHELL [ "/bin/bash", "-c" ]
