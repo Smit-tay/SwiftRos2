@@ -8,7 +8,24 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(xacro REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
+# Generate messages, services and actions
+rosidl_generate_interfaces(${PROJECT_NAME}
+  # Messages
+  "messaging/msg/MoveToPosition.msg"
+  # Services
+  "messaging/srv/MoveToPosition.srv"
+  "messaging/srv/MoveTo.srv"
+  "messaging/srv/SetPump.srv"
+  "messaging/srv/SetGripper.srv"
+  "messaging/srv/Reset.srv"
+  # Actions
+  "messaging/action/MoveArm.action"
+  DEPENDENCIES
+    std_msgs
+    geometry_msgs
+)
 
 # Define the output URDF path
 set(URDF_FILE ${CMAKE_BINARY_DIR}/swiftpro.urdf)
@@ -42,7 +59,5 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-
 # Export package dependencies
 ament_package()
-

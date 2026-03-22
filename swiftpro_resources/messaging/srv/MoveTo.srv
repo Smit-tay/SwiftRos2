@@ -1,15 +1,9 @@
-# Goal
 float32 x
 float32 y
 float32 z
 float32 speed
+bool wait
 ---
-# Result
 bool success
 int32 error_code
 string message
----
-# Feedback
-float32 current_x
-float32 current_y
-float32 current_z

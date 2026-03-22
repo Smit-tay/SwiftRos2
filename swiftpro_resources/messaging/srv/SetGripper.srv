@@ -1,0 +1,4 @@
+bool catch_object
+---
+bool success
+int32 error_code

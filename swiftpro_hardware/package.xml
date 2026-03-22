@@ -2,8 +2,8 @@
 <package format="3">
   <name>swiftpro_hardware</name>
   <version>0.0.1</version>
-  <description>Hardware control node (via USB/Bluetooth/etc) for uArm Swift Pro</description>
-  <maintainer email="user@example.com">Your Name</maintainer>
+  <description>Hardware control node (via USB serial) for uArm Swift Pro</description>
+  <maintainer email="smith.jack.sidman@gmail.com">Jack Sidman Smith</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -12,6 +12,7 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>swiftpro_resources</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
