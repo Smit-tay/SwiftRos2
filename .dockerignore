@@ -1,0 +1,3 @@
+install/swiftpro_resources/share/swiftpro_resources/urdf/*.STL
+build/
+log/

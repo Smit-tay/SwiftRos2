@@ -1,0 +1,15 @@
+# Runtime-only container for swiftpro_hardware
+# Built on NUC, deployed on worker
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    ROS_DISTRO=jazzy \
+    TZ=Europe/Berlin
+
+WORKDIR /opt/swiftpro
+
+CMD ["bash", "-c", "source /opt/ros/jazzy/setup.bash && \
+    source /opt/swiftpro/install/setup.bash && \
+    ros2 run swiftpro_hardware swiftpro_hardware --ros-args -p port:=/dev/ttyACM0"]
