@@ -46,6 +46,9 @@ public:
   : Node("swiftpro_hardware")
   , swift_(nullptr)
   {
+      
+    instance_ = this;  // Must be first — connect() uses it via callback
+    
     // Parameters
     declare_parameter<std::string>("port", "/dev/ttyACM0");
     declare_parameter<int>("baudrate", 115200);
@@ -130,11 +133,14 @@ private:
         swift_.reset();
         return;
       }
+    // Allow arm to stabilise after connection before enabling position reporting
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-      // Register position report callback
-      swift_->set_report_position(static_cast<float>(position_report_interval_));
       // Register position report handler — uarm API requires raw function pointer
       swift_->register_report_position_callback(SwiftProHardware::position_callback);
+      // Register position report callback
+      int ret = swift_->set_report_position(static_cast<float>(position_report_interval_), true, 5.0f);
+      RCLCPP_INFO(get_logger(), "set_report_position returned: %d", ret);
 
       RCLCPP_INFO(get_logger(), "Connected to UArm Swift Pro on %s", port_.c_str());
 
