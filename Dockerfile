@@ -1,96 +1,147 @@
-# Start with an official ROS 2 base image for Jazzy Jalisco
+# Dockerfile
+# Copyright 2025 Jack Sidman Smith
+# Licensed under the MIT License. See LICENSE in project root.
+#
+# Development image for SwiftRos2.
+#
+# SwiftRos2 runs in its own container, independent of TopicFS.
+# The two communicate via DDS over network_mode: host.
+#
+# To make SwiftRos2 message types readable by TopicFS:
+#   colcon build --packages-select swiftpro_resources \
+#                --install-base /opt/topicfs_typesupport/swiftpro_resources
+#   podman cp swiftros2:/opt/topicfs_typesupport/swiftpro_resources \
+#             topicfs:/opt/topicfs_typesupport/swiftpro_resources
+#   # Then in the TopicFS container:
+#   source scripts/setup_typesupport.sh
+
 FROM ros:jazzy-ros-base
 
-# Set environment variables
+# -----------------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------------
+
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    ROS_DISTRO=jazzy
+    ROS_DISTRO=jazzy \
+    ROS_DOMAIN_ID=11 \
+    TZ=Europe/Berlin
 
-# Define build arguments for host UID, GID, and username with defaults
+# -----------------------------------------------------------------------------
+# Build arguments
+# -----------------------------------------------------------------------------
+
 ARG HOST_UID=1000
 ARG HOST_GID=1000
 ARG USERNAME=user
 
-# Install essential packages and ROS development tools
+# -----------------------------------------------------------------------------
+# System packages
+# -----------------------------------------------------------------------------
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    bash-completion \
-    curl \
-    gdb \
-    git \
-    nano \
-    openssh-client \
-    python3-colcon-argcomplete \
-    python3-colcon-common-extensions \
-    sudo \
-    vim \
-    && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+        bash-completion \
+        clangd \
+        curl \
+        gdb \
+        git \
+        openssh-client \
+        python3-colcon-argcomplete \
+        python3-colcon-common-extensions \
+        sudo \
+        vim \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /swiftros_ws
+# -----------------------------------------------------------------------------
+# User setup
+# -----------------------------------------------------------------------------
 
-# Setup user configuration
-# Create or rename group and user, handle existing UID/GID conflicts
-RUN echo "Configuring group with GID=$HOST_GID for $USERNAME" && \
-    (getent group $HOST_GID && groupmod -n $USERNAME $(getent group $HOST_GID | cut -d: -f1) || groupadd --gid $HOST_GID $USERNAME) && \
-    echo "Configuring user $USERNAME with UID=$HOST_UID, GID=$HOST_GID" && \
-    (id -u $HOST_UID >/dev/null 2>&1 && \
-     echo "UID $HOST_UID exists, updating user" && \
-     usermod -l $USERNAME -d /home/$USERNAME -m -g $HOST_GID $(id -un $HOST_UID) || \
-     useradd --uid $HOST_UID --gid $HOST_GID -m -s /bin/bash $USERNAME) && \
-    echo "Configuring sudo and bashrc for $USERNAME" && \
+RUN echo "Configuring group GID=$HOST_GID for $USERNAME" && \
+    (getent group $HOST_GID \
+        && groupmod -n $USERNAME $(getent group $HOST_GID | cut -d: -f1) \
+        || groupadd --gid $HOST_GID $USERNAME) && \
+    echo "Configuring user UID=$HOST_UID GID=$HOST_GID" && \
+    (id -u $HOST_UID >/dev/null 2>&1 \
+        && usermod -l $USERNAME -d /home/$USERNAME -m -g $HOST_GID \
+                   $(id -un $HOST_UID) 2>/dev/null \
+        || useradd --uid $HOST_UID --gid $HOST_GID -m -s /bin/bash $USERNAME) && \
     echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME && \
     chmod 0440 /etc/sudoers.d/$USERNAME && \
-    echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /home/$USERNAME/.bashrc && \
-    echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /home/$USERNAME/.bashrc && \
-    echo "Setting ownership of /swiftros_ws to $USERNAME:$HOST_GID" && \
-    chown -R $USERNAME:$HOST_GID /swiftros_ws && \
-    echo "User setup complete: $(id $USERNAME)"
+    mkdir -p /home/$USERNAME/.ros/log && \
+    mkdir -p /swiftros_ws && \
+    chown -R $USERNAME:$HOST_GID /home/$USERNAME /swiftros_ws && \
+    echo "source /opt/ros/$ROS_DISTRO/setup.bash" \
+        >> /home/$USERNAME/.bashrc && \
+    echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" \
+        >> /home/$USERNAME/.bashrc
 
+# -----------------------------------------------------------------------------
+# Typesupport export directory
+# After building swiftpro_resources inside this container, install it here
+# so it can be copied into the TopicFS container.
+# -----------------------------------------------------------------------------
+
+RUN mkdir -p /opt/topicfs_typesupport && \
+    chown -R $USERNAME:$HOST_GID /opt/topicfs_typesupport
 
 USER $USERNAME
 
-# Install ROS 2 dependencies
+# -----------------------------------------------------------------------------
+# ROS2 packages
+#
+# Core robot stack:
+#   - ros2-control / controllers / hardware-interface: hardware node
+#   - robot-state-publisher + tf2: kinematic transforms + /robot_description
+#   - xacro: URDF/xacro processing
+#   - joint-state-publisher[-gui]: manual joint control during development
+#   - rviz2: visualisation during development
+#
+# Build tooling:
+#   - ament-cmake-clang-format / clang-tidy: lint and format enforcement
+#   - generate-parameter-library: typed ROS2 parameters
+#   - rosidl-generator-type-description: required for custom msg/srv/action
+#
+# Not included here (belongs in TopicFS Dockerfile):
+#   - fuse3, libfuse3-dev, nlohmann-json3-dev, rosbag2
+# -----------------------------------------------------------------------------
+
 RUN sudo apt-get update && \
     sudo apt-get install -y --no-install-recommends \
-    ros-jazzy-ros-gz \
-    ros-jazzy-sdformat-urdf \
-    ros-jazzy-joint-state-publisher-gui \
-    ros-jazzy-ros2controlcli \
-    ros-jazzy-controller-interface \
-    ros-jazzy-ament-cmake-clang-format \
-    ros-jazzy-ament-cmake-clang-tidy \
-    ros-jazzy-controller-manager \
-    ros-jazzy-ros2-control-test-assets \
-    ros-jazzy-hardware-interface \
-    ros-jazzy-control-msgs \
-    ros-jazzy-generate-parameter-library \
-    ros-jazzy-realtime-tools \
-    ros-jazzy-joint-state-publisher \
-    ros-jazzy-joint-state-broadcaster \
-    ros-jazzy-moveit-ros-move-group \
-    ros-jazzy-moveit-kinematics \
-    ros-jazzy-moveit-planners-ompl \
-    ros-jazzy-moveit-ros-visualization \
-    ros-jazzy-joint-trajectory-controller \
-    ros-jazzy-moveit-simple-controller-manager \
-    ros-jazzy-rviz2 \
-    ros-jazzy-xacro \
-    && sudo apt-get clean && \
-    sudo rm -rf /var/lib/apt/lists/*
+        ros-jazzy-ament-cmake-clang-format \
+        ros-jazzy-ament-cmake-clang-tidy \
+        ros-jazzy-control-msgs \
+        ros-jazzy-controller-interface \
+        ros-jazzy-controller-manager \
+        ros-jazzy-generate-parameter-library \
+        ros-jazzy-hardware-interface \
+        ros-jazzy-joint-state-broadcaster \
+        ros-jazzy-joint-state-publisher \
+        ros-jazzy-joint-state-publisher-gui \
+        ros-jazzy-joint-trajectory-controller \
+        ros-jazzy-realtime-tools \
+        ros-jazzy-robot-state-publisher \
+        ros-jazzy-ros2-control \
+        ros-jazzy-ros2-control-test-assets \
+        ros-jazzy-ros2-controllers \
+        ros-jazzy-ros2controlcli \
+        ros-jazzy-rosidl-generator-type-description \
+        ros-jazzy-rviz2 \
+        ros-jazzy-sdformat-urdf \
+        ros-jazzy-tf2 \
+        ros-jazzy-tf2-ros \
+        ros-jazzy-xacro \
+    && sudo apt-get clean \
+    && sudo rm -rf /var/lib/apt/lists/*
 
-# Install missing ROS 2 dependencies
-COPY . /swiftros_ws/src
-RUN sudo chown -R $USERNAME:$USERNAME /swiftros_ws && \
-    sudo apt-get update && \
-    rosdep update && \
-    rosdep install --from-paths src --ignore-src --rosdistro $ROS_DISTRO -y && \
-    sudo apt-get clean && \
-    sudo rm -rf /var/lib/apt/lists/* && \
-    rm -rf /home/$USERNAME/.ros 
+# -----------------------------------------------------------------------------
+# Shell and working directory
+# Source tree is mounted at runtime via docker-compose / podman run.
+# Nothing is baked into the image — keep the image reusable.
+# -----------------------------------------------------------------------------
 
-# Set the default shell to bash and the workdir to the source directory
-SHELL [ "/bin/bash", "-c" ]
-ENTRYPOINT []
+SHELL ["/bin/bash", "-c"]
 WORKDIR /swiftros_ws
+ENTRYPOINT []

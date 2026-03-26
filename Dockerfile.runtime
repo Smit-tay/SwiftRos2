@@ -1,15 +1,55 @@
-# Runtime-only container for swiftpro_hardware
-# Built on NUC, deployed on worker
-FROM ros:jazzy-ros-base
+# Dockerfile.runtime
+# Copyright 2025 Jack Sidman Smith
+# Licensed under the MIT License. See LICENSE in project root.
+#
+# Lean runtime image for swiftpro_hardware.
+# Built on the NUC, pushed to worker's registry, run on worker.
+#
+# The built ROS2 artifacts are NOT baked into this image.
+# They are rsynced separately to /opt/swiftpro/install on the worker
+# and mounted at runtime. This means code updates only require:
+#   colcon build → rsync → restart
+# A full image rebuild is only needed when this Dockerfile changes.
+
+FROM ros:jazzy-ros-core
+
+# -----------------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------------
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     ROS_DISTRO=jazzy \
+    ROS_DOMAIN_ID=11 \
     TZ=Europe/Berlin
 
-WORKDIR /opt/swiftpro
+# -----------------------------------------------------------------------------
+# Runtime dependencies only
+# No build tools, no dev tools, no GUI packages.
+# Only what swiftpro_hardware needs to run.
+# -----------------------------------------------------------------------------
 
-CMD ["bash", "-c", "source /opt/ros/jazzy/setup.bash && \
-    source /opt/swiftpro/install/setup.bash && \
-    ros2 run swiftpro_hardware swiftpro_hardware --ros-args -p port:=/dev/ttyACM0"]
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpython3-dev \
+        python3 \
+        ros-jazzy-geometry-msgs \
+        ros-jazzy-rcl-interfaces \
+        ros-jazzy-rclcpp \
+        ros-jazzy-robot-state-publisher \
+        ros-jazzy-rosidl-generator-type-description \
+        ros-jazzy-sensor-msgs \
+        ros-jazzy-std-msgs \
+        ros-jazzy-tf2 \
+        ros-jazzy-tf2-ros \
+        ros-jazzy-xacro \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Entrypoint
+# SWIFTPRO_PORT and ENTRYPOINT are intentionally NOT set here — these are 
+# machine-specific (essentially arbitrary) values decided upon by a user.
+# They must be set in docker-compose.runtime.yml for each deployment target.
+# -----------------------------------------------------------------------------

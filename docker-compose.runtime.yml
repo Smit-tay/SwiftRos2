@@ -1,0 +1,15 @@
+services:
+  swiftpro_hardware:
+    image: localhost:5000/swiftpro_hardware:latest
+    container_name: swiftpro_hardware
+    network_mode: "host"
+    privileged: true
+    volumes:
+      - /opt/swiftpro:/opt/swiftpro:z
+      - /dev:/dev
+    environment:
+      ROS_DOMAIN_ID: 11
+      SWIFTPRO_PORT: /dev/ttyACM0
+    entrypoint: ["/opt/swiftpro/entrypoint.sh"]
+    restart: unless-stopped
+    
