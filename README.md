@@ -318,15 +318,15 @@ Edit code on NUC
     → NF_07  restart runtime container on worker
 ```
 
-### Geany build menu reference
+### IDE menu reference
 
 | Entry | Action |
 |---|---|
-| NF_04 SwiftRos2 - Build | colcon build inside dev container |
-| NF_05 SwiftRos2 - Clean | remove build/ install/ log/ |
-| NF_06 SwiftRos2 - Deploy to worker | rsync artifacts + scripts to worker |
-| NF_07 SwiftRos2 - Restart on worker | restart runtime container via SSH |
-| NF_08 SwiftRos2 - Build+Push runtime image | rebuild runtime image, push to registry |
+| SwiftRos2 - Build | colcon build inside dev container |
+| SwiftRos2 - Clean | remove build/ install/ log/ |
+| SwiftRos2 - Deploy to worker | rsync artifacts + scripts to worker |
+| SwiftRos2 - Restart on worker | restart runtime container via SSH |
+| SwiftRos2 - Build+Push runtime image | rebuild runtime image, push to registry |
 
 ---
 
