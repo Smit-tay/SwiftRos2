@@ -286,7 +286,7 @@ SwiftRos2/
 
 ```bash
 # On the NUC — build the development image
-cd /home/jack/dev/smithjack.net/SwiftRos2
+cd /home/<USER>/dev/SwiftRos2
 podman build --format docker \
   --build-arg HOST_UID=$(id -u) \
   --build-arg HOST_GID=$(id -g) \
@@ -347,39 +347,6 @@ podman logs swiftpro_hardware
 # Verify topics are visible on the network
 ros2 topic list
 ros2 topic echo /joint_states
-```
-
----
-
-## Integration with TopicFS
-
-SwiftRos2 communicates with TopicFS via DDS over the host network
-(`network_mode: host`, `ROS_DOMAIN_ID=11`). No special configuration is required —
-TopicFS discovers SwiftRos2 topics and services automatically at runtime.
-
-To make SwiftRos2 message types human-readable in TopicFS (rather than base64
-encoded CDR), the `swiftpro_resources` typesupport `.so` files must be available
-to the TopicFS container:
-
-```bash
-# In the SwiftRos2 dev container on the NUC:
-colcon build --packages-select swiftpro_resources \
-             --install-base /opt/topicfs_typesupport/swiftpro_resources
-
-# Copy into the TopicFS container:
-podman cp swiftpro_ros:/opt/topicfs_typesupport/swiftpro_resources \
-          topicfs:/opt/topicfs_typesupport/swiftpro_resources
-
-# In the TopicFS container:
-source scripts/setup_typesupport.sh
-```
-
-After this, TopicFS will expose SwiftRos2 topics as readable JSON files, for example:
-
-```bash
-cat ~/fuse_mount/swiftpro/position/latest
-cat ~/fuse_mount/joint_states/latest
-cat ~/fuse_mount/swiftpro/end_effector_position/latest
 ```
 
 ---
