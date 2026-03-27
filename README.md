@@ -287,12 +287,9 @@ SwiftRos2/
 ```bash
 # On the NUC — build the development image
 cd /home/<USER>/dev/SwiftRos2
-podman build --format docker \
-  --build-arg HOST_UID=$(id -u) \
-  --build-arg HOST_GID=$(id -g) \
-  --build-arg USERNAME=$(id -un) \
-  -t swiftros2_swiftpro_ros .
-
+# podman will complain about Docker's use of no OCI instructions - use env. var.
+BUILDAH_FORMAT=docker \
+  podman compose -f docker-compose.dev.yml build --no-cache --pull
 # Start the development container
 podman-compose up -d
 
