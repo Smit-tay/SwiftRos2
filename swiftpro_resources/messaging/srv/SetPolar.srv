@@ -1,0 +1,9 @@
+float32 stretch
+float32 rotation
+float32 height
+int32 speed
+bool relative
+bool wait
+---
+bool success
+int32 error_code

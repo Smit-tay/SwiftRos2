@@ -1,0 +1,5 @@
+int32 servo_id
+bool attach
+---
+bool success
+int32 error_code

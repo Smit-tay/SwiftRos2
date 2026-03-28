@@ -1,0 +1,5 @@
+int32 servo_id
+---
+# attached: true=attached, false=detached
+bool attached
+bool success

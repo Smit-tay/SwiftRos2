@@ -1,0 +1,6 @@
+# value: 0=input, 1=output
+int32 pin
+int32 value
+---
+bool success
+int32 error_code

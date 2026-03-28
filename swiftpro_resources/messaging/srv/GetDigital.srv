@@ -1,0 +1,5 @@
+int32 pin
+---
+# value: 0=low, 1=high, -1=failed
+int32 value
+bool success

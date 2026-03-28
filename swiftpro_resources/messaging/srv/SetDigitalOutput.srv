@@ -1,0 +1,6 @@
+# value: 0=low, 1=high
+int32 pin
+int32 value
+---
+bool success
+int32 error_code

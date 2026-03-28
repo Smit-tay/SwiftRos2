@@ -1,4 +1,4 @@
-# Dockerfile
+# Dockerfile.dev
 # Copyright 2025 Jack Sidman Smith
 # Licensed under the MIT License. See LICENSE in project root.
 #
@@ -104,7 +104,7 @@ USER $USERNAME
 #   - generate-parameter-library: typed ROS2 parameters
 #   - rosidl-generator-type-description: required for custom msg/srv/action
 #
-# Not included here (belongs in TopicFS Dockerfile):
+# Not included here (belongs in TopicFS Dockerfile.dev):
 #   - fuse3, libfuse3-dev, nlohmann-json3-dev, rosbag2
 # -----------------------------------------------------------------------------
 
@@ -144,4 +144,4 @@ RUN sudo apt-get update && \
 
 SHELL ["/bin/bash", "-c"]
 WORKDIR /swiftros_ws
-ENTRYPOINT []
+CMD ["/bin/bash"]

@@ -1,0 +1,5 @@
+# mode: 0=general, 1=laser, 2=3D print, 3=pen/gripper
+int32 mode
+---
+bool success
+int32 error_code

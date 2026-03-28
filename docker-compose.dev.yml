@@ -1,15 +1,15 @@
-services:
-  swiftpro_ros:
+ervices:
+  swiftros2_dev:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
       args:
         - HOST_UID=${UID:-1000}
         - HOST_GID=${GID:-1000}
         - USERNAME=${USER:-$(id -un)}
-    container_name: swiftpro_ros
+    image: localhost/swiftros2_dev:latest
+    container_name: swiftros2_dev
     network_mode: "host"
-    privileged: true
     userns_mode: "keep-id"
     command: /bin/bash
     tty: true
@@ -22,3 +22,4 @@ services:
       DISPLAY: $DISPLAY
     cap_add:
       - SYS_NICE
+ 

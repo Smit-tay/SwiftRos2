@@ -398,6 +398,43 @@ cat ~/fuse_mount/swiftpro/end_effector_position/latest
 
 ---
 
+## Host Environment Requirements
+
+### Rootless Podman — `userns_mode: keep-id` on Fedora 43
+
+The development container uses `userns_mode: keep-id` so that files created inside
+the container (build artifacts, log directories) are owned by your host user rather
+than root. Without this, every `colcon build` creates root-owned files in the
+mounted source tree, causing permission errors on subsequent builds.
+
+On Fedora 43 with Podman 5.x, `--userns=keep-id` hangs at container start unless
+`fuse-overlayfs` is explicitly configured as the storage mount program. The default
+kernel overlay driver does not support idmapped mounts in this configuration.
+
+**One-time fix — create `~/.config/containers/storage.conf`:**
+```bash
+mkdir -p ~/.config/containers
+cat > ~/.config/containers/storage.conf << 'EOF'
+[storage]
+  driver = "overlay"
+
+[storage.options.overlay]
+  mount_program = "/usr/bin/fuse-overlayfs"
+EOF
+```
+
+Verify `fuse-overlayfs` is installed first:
+```bash
+which fuse-overlayfs
+# expected: /usr/bin/fuse-overlayfs
+# if missing: sudo dnf install fuse-overlayfs
+```
+
+This setting is persistent and applies to all rootless podman containers on the
+host. It has no effect on rootful podman (sudo podman). Sonnet 4.6Claude is
+
+---
+
 ## Hardware Notes
 
 - **Connection:** USB serial `/dev/ttyACM0` at 115200 baud
