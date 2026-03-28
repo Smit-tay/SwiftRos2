@@ -14,7 +14,7 @@ A complete ROS2 driver stack for the UFactory UArm Swift Pro robotic arm.
 SwiftRos2 provides full ROS2 integration for the UArm Swift Pro — a 3-DOF desktop
 robotic arm with a parallel linkage mechanism. It exposes the arm's capabilities as
 standard ROS2 topics and services, making it compatible with any ROS2 consumer
-including TopicFS, SteampunkClock, RViz2, and custom applications.
+including TopicFS, RViz2, and custom applications.
 
 SwiftRos2 is designed to be self-contained. It communicates with other ROS2 nodes
 (including TopicFS) via DDS over the host network. No shared filesystem or shared
@@ -286,13 +286,10 @@ SwiftRos2/
 
 ```bash
 # On the NUC — build the development image
-cd /home/jack/dev/smithjack.net/SwiftRos2
-podman build --format docker \
-  --build-arg HOST_UID=$(id -u) \
-  --build-arg HOST_GID=$(id -g) \
-  --build-arg USERNAME=$(id -un) \
-  -t swiftros2_swiftpro_ros .
-
+cd /home/<USER>/dev/SwiftRos2
+# podman will complain about Docker's use of no OCI instructions - use env. var.
+BUILDAH_FORMAT=docker \
+  podman compose -f docker-compose.dev.yml build --no-cache --pull
 # Start the development container
 podman-compose up -d
 
@@ -318,15 +315,15 @@ Edit code on NUC
     → NF_07  restart runtime container on worker
 ```
 
-### Geany build menu reference
+### IDE menu reference
 
 | Entry | Action |
 |---|---|
-| NF_04 SwiftRos2 - Build | colcon build inside dev container |
-| NF_05 SwiftRos2 - Clean | remove build/ install/ log/ |
-| NF_06 SwiftRos2 - Deploy to worker | rsync artifacts + scripts to worker |
-| NF_07 SwiftRos2 - Restart on worker | restart runtime container via SSH |
-| NF_08 SwiftRos2 - Build+Push runtime image | rebuild runtime image, push to registry |
+| SwiftRos2 - Build | colcon build inside dev container |
+| SwiftRos2 - Clean | remove build/ install/ log/ |
+| SwiftRos2 - Deploy to worker | rsync artifacts + scripts to worker |
+| SwiftRos2 - Restart on worker | restart runtime container via SSH |
+| SwiftRos2 - Build+Push runtime image | rebuild runtime image, push to registry |
 
 ---
 
@@ -347,39 +344,6 @@ podman logs swiftpro_hardware
 # Verify topics are visible on the network
 ros2 topic list
 ros2 topic echo /joint_states
-```
-
----
-
-## Integration with TopicFS
-
-SwiftRos2 communicates with TopicFS via DDS over the host network
-(`network_mode: host`, `ROS_DOMAIN_ID=11`). No special configuration is required —
-TopicFS discovers SwiftRos2 topics and services automatically at runtime.
-
-To make SwiftRos2 message types human-readable in TopicFS (rather than base64
-encoded CDR), the `swiftpro_resources` typesupport `.so` files must be available
-to the TopicFS container:
-
-```bash
-# In the SwiftRos2 dev container on the NUC:
-colcon build --packages-select swiftpro_resources \
-             --install-base /opt/topicfs_typesupport/swiftpro_resources
-
-# Copy into the TopicFS container:
-podman cp swiftpro_ros:/opt/topicfs_typesupport/swiftpro_resources \
-          topicfs:/opt/topicfs_typesupport/swiftpro_resources
-
-# In the TopicFS container:
-source scripts/setup_typesupport.sh
-```
-
-After this, TopicFS will expose SwiftRos2 topics as readable JSON files, for example:
-
-```bash
-cat ~/fuse_mount/swiftpro/position/latest
-cat ~/fuse_mount/joint_states/latest
-cat ~/fuse_mount/swiftpro/end_effector_position/latest
 ```
 
 ---
