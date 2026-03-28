@@ -14,7 +14,7 @@ A complete ROS2 driver stack for the UFactory UArm Swift Pro robotic arm.
 SwiftRos2 provides full ROS2 integration for the UArm Swift Pro — a 3-DOF desktop
 robotic arm with a parallel linkage mechanism. It exposes the arm's capabilities as
 standard ROS2 topics and services, making it compatible with any ROS2 consumer
-including TopicFS, SteampunkClock, RViz2, and custom applications.
+including TopicFS, RViz2, and custom applications.
 
 SwiftRos2 is designed to be self-contained. It communicates with other ROS2 nodes
 (including TopicFS) via DDS over the host network. No shared filesystem or shared
