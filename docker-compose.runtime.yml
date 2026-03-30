@@ -1,7 +1,7 @@
 services:
-  swiftros2_hardware:
+  swiftros2_runtime:
     image: localhost:5000/swiftros2_runtime:latest
-    container_name: swiftros2_hardware
+    container_name: swiftros2_runtime
     network_mode: "host"
     privileged: true
     volumes:

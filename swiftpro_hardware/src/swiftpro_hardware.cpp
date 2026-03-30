@@ -451,9 +451,22 @@ private:
       false,
       request->wait);
 
-    response->success    = (result == 0);
-    response->error_code = result;
-    response->message    = (result == 0) ? "OK" : "Movement failed";
+    if (request->wait) {
+      // Synchronous path: set_position blocks until the firmware acknowledges
+      // the move. The return code is meaningful — 0 = success, non-zero = failure.
+      response->success    = (result == 0);
+      response->error_code = result;
+      response->message    = (result == 0) ? "OK" : "Movement failed";
+    } else {
+      // Asynchronous path: set_position fires the serial command and returns
+      // immediately, before the firmware has acknowledged anything. The uarm
+      // library unconditionally returns -1 in this case — it carries no
+      // information about whether the move will succeed. Physical movement is
+      // verified by reading /swiftpro/position after an appropriate settle time.        
+      response->success    = true;
+      response->error_code = 0;
+      response->message    = "OK";
+    }
   }
 
   void handle_set_polar(

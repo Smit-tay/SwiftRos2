@@ -51,8 +51,8 @@ sudo udevadm trigger
 
 Run once to create the directory for project binaries:
 ```bash
-sudo mkdir -p /opt/swiftpro/install
-sudo chown -R jack:jack /opt/swiftpro
+sudo mkdir -p /opt/swiftros2/install
+sudo chown -R <USER>:<GROUP> /opt/swiftros2
 ```
 
 ---
@@ -61,15 +61,15 @@ sudo chown -R jack:jack /opt/swiftpro
 We provide development environment files for several IDEs.  The default is "geany" so, the appropriaet project and workspace files are present in the project root.  Other IDE configuration files may be found in the IDE directory.
 ```bash
 # Build the project
-cd /home/jack/dev/smithjack.net/SwiftRos2
-podman exec topicfs bash -c "cd /home/jack/dev/smithjack.net/SwiftRos2 && \
+cd /home/<USER>/dev/smithjack.net/SwiftRos2
+podman exec topicfs bash -c "cd /home/<USER>/dev/smithjack.net/SwiftRos2 && \
     source /opt/ros/jazzy/setup.bash && \
     colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 
 # Sync binaries to worker (excludes STL mesh files)
 rsync -av --exclude='*.STL' \
-    /home/jack/dev/smithjack.net/SwiftRos2/install/ \
-    worker:/opt/swiftpro/install/
+    /home/<USER>/dev/smithjack.net/SwiftRos2/install/ \
+    worker:/opt/swiftros2/install/
 ```
 
 Both commands are available as Geany build commands:
@@ -83,8 +83,8 @@ Both commands are available as Geany build commands:
 The runtime **container** image *only* needs to be rebuilt when system-level dependencies
 change (new ROS2 packages, OS updates). It does NOT need rebuilding for code changes.
 ```bash
-cd /home/jack/dev/smithjack.net/SwiftRos2
-podman build -f Dockerfile.runtime -t swiftpro_hardware:latest .
+cd /home/<USER>/dev/smithjack.net/SwiftRos2
+podman build -f Dockerfile.runtime -t swiftros2_runtime:latest .
 ```
 
 ### Transfer to worker
@@ -92,7 +92,7 @@ podman build -f Dockerfile.runtime -t swiftpro_hardware:latest .
 The following command streams the image directly from NUC to worker without
 writing any temporary files to disk:
 ```bash
-podman save swiftpro_hardware:latest | ssh worker "podman load"
+podman save swiftros2_runtime:latest | ssh worker "podman load"
 ```
 
 `podman save` serializes the image to a tar stream on stdout. The pipe sends it
@@ -108,7 +108,7 @@ Copying blob sha256:...
 [... one line per image layer ...]
 Copying config sha256:...
 Writing manifest to image destination
-Loaded image: localhost/swiftpro_hardware:latest
+Loaded image: localhost/swiftros2_runtime:latest
 ```
 
 ---
@@ -116,26 +116,26 @@ Loaded image: localhost/swiftpro_hardware:latest
 ## Run on worker
 ```bash
 podman run --rm -it \
-    --name swiftpro_hardware \
+    --name swiftros2_runtime \
     --privileged \
     --network host \
     --userns=host \
     -v /dev:/dev \
     --security-opt label=disable \
     -e ROS_DOMAIN_ID=11 \
-    -v /opt/swiftpro/install:/opt/swiftpro/install \
-    swiftpro_hardware:latest
+    -v /opt/swiftros2/install:/opt/swiftros2/install \
+    swiftros2_runtime:latest
 ```
 
 ### Expected output on successful connection
 ```
 connect success
 recv thread start
-[INFO] [...] [swiftpro_hardware]: Connected to UArm Swift Pro on /dev/ttyACM0
-[INFO] [...] [swiftpro_hardware]: Device type: SwiftPro
-[INFO] [...] [swiftpro_hardware]: Hardware version: 3.3.1
-[INFO] [...] [swiftpro_hardware]: Firmware version: 3.2.0
-[INFO] [...] [swiftpro_hardware]: SwiftPro Hardware node started on port /dev/ttyACM0
+[INFO] [...] [swiftros2_runtime]: Connected to UArm Swift Pro on /dev/ttyACM0
+[INFO] [...] [swiftros2_runtime]: Device type: SwiftPro
+[INFO] [...] [swiftros2_runtime]: Hardware version: 3.3.1
+[INFO] [...] [swiftros2_runtime]: Firmware version: 3.2.0
+[INFO] [...] [swiftros2_runtime]: SwiftRos2 "swiftpro_hardware" ROS2 node started - port /dev/ttyACM0
 ```
 
 ---
@@ -156,9 +156,9 @@ recv thread start
 Open a second terminal (worker) and exec into the running container:
 ```bash
 # List active ROS2 topics
-podman exec -it swiftpro_hardware bash -c \
+podman exec -it swiftros2_runtime bash -c \
     "source /opt/ros/jazzy/setup.bash && \
-     source /opt/swiftpro/install/setup.bash && \
+     source /opt/swiftros2/install/setup.bash && \
      ros2 topic list"
 ```
 
@@ -167,17 +167,17 @@ Expected output:
 /joint_states
 /parameter_events
 /rosout
-/swiftpro/connected
-/swiftpro/position
-/swiftpro/pump_status
+/swiftros2/connected
+/swiftros2/position
+/swiftros2/pump_status
 ```
 
 To inspect live data:
 ```bash
-podman exec -it swiftpro_hardware bash -c \
+podman exec -it swiftros2_runtime bash -c \
     "source /opt/ros/jazzy/setup.bash && \
-     source /opt/swiftpro/install/setup.bash && \
-     ros2 topic echo /swiftpro/connected"
+     source /opt/swiftros2/install/setup.bash && \
+     ros2 topic echo /swiftros2/connected"
 ```
 
 ---
@@ -187,15 +187,15 @@ podman exec -it swiftpro_hardware bash -c \
 | Topic | Type | Description |
 |-------|------|-------------|
 | /joint_states | sensor_msgs/JointState | Arm joint angles in radians |
-| /swiftpro/position | geometry_msgs/Point | Arm XYZ position in mm |
-| /swiftpro/pump_status | std_msgs/Bool | Suction pump on/off state |
-| /swiftpro/connected | std_msgs/Bool | Arm connection state |
+| /swiftros2/position | geometry_msgs/Point | Arm XYZ position in mm |
+| /swiftros2/pump_status | std_msgs/Bool | Suction pump on/off state |
+| /swiftros2/connected | std_msgs/Bool | Arm connection state |
 
 ## Services
 
 | Service | Type | Description |
 |---------|------|-------------|
-| /swiftpro/move_to | swiftpro_resources/MoveTo | Move arm to XYZ position |
-| /swiftpro/set_pump | swiftpro_resources/SetPump | Control suction pump |
-| /swiftpro/set_gripper | swiftpro_resources/SetGripper | Control gripper |
-| /swiftpro/reset | swiftpro_resources/Reset | Reset arm to home position |
+| /swiftros2/move_to | swiftros2_resources/MoveTo | Move arm to XYZ position |
+| /swiftros2/set_pump | swiftros2_resources/SetPump | Control suction pump |
+| /swiftros2/set_gripper | swiftros2_resources/SetGripper | Control gripper |
+| /swiftros2/reset | swiftros2_resources/Reset | Reset arm to home position |
