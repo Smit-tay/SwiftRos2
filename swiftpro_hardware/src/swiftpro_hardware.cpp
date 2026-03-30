@@ -224,6 +224,8 @@ public:
       std::bind(&SwiftProHardware::handle_get_servo_attach, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    RCLCPP_INFO(get_logger(),
+                "SwiftPro hardware node —   Jack Sidman Smith - built %s %s", __DATE__, __TIME__);
     // ── Connect to arm ───────────────────────────────────────────────────────
     connect();
 
