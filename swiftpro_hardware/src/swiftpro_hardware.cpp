@@ -508,8 +508,11 @@ private:
       // ── Cancel check ───────────────────────────────────────────────────
       if (goal_handle->is_canceling())
       {
-        // Best-effort stop: flush queue, then command current position
+        // Note: the uarm C++ SDK and SwiftPro firmware have no true stop command.
+        // M112 (Marlin emergency stop) was tested and does not halt motion.
+        // The arm will complete its current movement segment before stopping.
         swift_->flush_cmd();
+        
         {
           std::lock_guard<std::mutex> lock(position_mutex_);
           if (current_position_.size() >= 3)

@@ -410,6 +410,11 @@ host. It has no effect on rootful podman (sudo podman). Sonnet 4.6Claude is
   commands (UArm API), metres for ROS2 topics.
 - **Safe home position:** `x=200mm, y=0mm, z=150mm` — used by the Reset service
   when no explicit position is provided.
+- ** EMERGENCY STOP **  M112 (Marlin emergency stop) tested on SwiftPro firmware 3.2.0
+   does not halt motion. flush_cmd() + command current position remains the
+   best-effort cancel implementation. Arm completes current movement
+   segment before stopping. Hardware limitation, not a software bug.
+  
 
 ## Firmware Version
 
