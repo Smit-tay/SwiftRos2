@@ -410,3 +410,13 @@ host. It has no effect on rootful podman (sudo podman). Sonnet 4.6Claude is
   commands (UArm API), metres for ROS2 topics.
 - **Safe home position:** `x=200mm, y=0mm, z=150mm` — used by the Reset service
   when no explicit position is provided.
+
+## Firmware Version
+
+SwiftRos2 was developed and tested against firmware 3.2.0. A newer series exists
+(V4.0–V4.10.0) but was never accompanied by an updated C++ SDK or protocol
+documentation — the V4.x changes were only reflected in a Python-only SDK. The one
+potentially useful addition in V4.x is closed-loop step-loss correction, but the
+dominant positional error in practice is mechanical gearbox backlash, which no
+firmware can fix. A firmware upgrade would require rework for no meaningful gain,
+so 3.2.0 is the tested and recommended version for this stack.

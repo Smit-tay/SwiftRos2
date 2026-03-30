@@ -7,6 +7,7 @@ project(swiftpro_hardware)
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(swiftpro_resources REQUIRED)
@@ -33,6 +34,7 @@ target_include_directories(swiftpro_hardware
 ament_target_dependencies(swiftpro_hardware
   geometry_msgs
   rclcpp
+  rclcpp_action
   sensor_msgs
   std_msgs
   swiftpro_resources

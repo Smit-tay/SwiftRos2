@@ -16,8 +16,14 @@
 //     /swiftpro/limit_switch     std_msgs/Bool
 //     /swiftpro/mode             std_msgs/Int8           (0=general,1=laser,2=3Dprint,3=pen/gripper)
 //
+//   Actions:
+//     /swiftpro/move_arm         swiftpro_resources/action/MoveArm
+//       Goal:     x, y, z (mm), speed (mm/min)
+//       Feedback: current_x, current_y, current_z (mm) at 10 Hz while moving
+//       Result:   success, error_code, message — position verified within move_tolerance_mm
+//       Cancel:   flush pending commands, command current position (best-effort stop)
+//
 //   Services:
-//     /swiftpro/move_to          swiftpro_resources/srv/MoveTo
 //     /swiftpro/set_pump         swiftpro_resources/srv/SetPump
 //     /swiftpro/set_gripper      swiftpro_resources/srv/SetGripper
 //     /swiftpro/reset            swiftpro_resources/srv/Reset
@@ -34,7 +40,7 @@
 //     /swiftpro/get_analog       swiftpro_resources/srv/GetAnalog
 //     /swiftpro/get_servo_attach swiftpro_resources/srv/GetServoAttach
 //
-// Joint names Joint1/Joint2/Joint3 match the URDF exactly.
+// Joint names Joint1/Joint2/Joint3 match the URDF joint names in swiftpro.xacro exactly.
 // robot_state_publisher computes Joint4-Joint8 via <mimic> tags.
 // The swiftpro_kinematics node computes end effector FK from these joints.
 
@@ -50,6 +56,7 @@
 // ROS2
 #include <geometry_msgs/msg/point.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int8.hpp>
@@ -58,10 +65,10 @@
 #include "uarm/uarm.h"
 
 // Project messages
+#include "swiftpro_resources/action/move_arm.hpp"
 #include "swiftpro_resources/srv/get_analog.hpp"
 #include "swiftpro_resources/srv/get_digital.hpp"
 #include "swiftpro_resources/srv/get_servo_attach.hpp"
-#include "swiftpro_resources/srv/move_to.hpp"
 #include "swiftpro_resources/srv/reset.hpp"
 #include "swiftpro_resources/srv/set_acceleration.hpp"
 #include "swiftpro_resources/srv/set_buzzer.hpp"
@@ -94,6 +101,9 @@ static constexpr double DEG_TO_RAD = M_PI / 180.0;
 class SwiftProHardware : public rclcpp::Node
 {
 public:
+  using MoveArm        = swiftpro_resources::action::MoveArm;
+  using GoalHandleMoveArm = rclcpp_action::ServerGoalHandle<MoveArm>;
+
   SwiftProHardware()
   : Node("swiftpro_hardware")
   , swift_(nullptr)
@@ -106,11 +116,13 @@ public:
     declare_parameter<int>("baudrate", 115200);
     declare_parameter<double>("position_report_interval", 0.1);
     declare_parameter<double>("joint_state_publish_rate", 10.0);
+    declare_parameter<double>("move_tolerance_mm", 15.0);
 
     port_                      = get_parameter("port").as_string();
     baudrate_                  = get_parameter("baudrate").as_int();
     position_report_interval_  = get_parameter("position_report_interval").as_double();
     const double publish_rate  = get_parameter("joint_state_publish_rate").as_double();
+    move_tolerance_mm_         = get_parameter("move_tolerance_mm").as_double();
 
     // ── Publishers ──────────────────────────────────────────────────────────
     joint_state_pub_    = create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
@@ -123,12 +135,20 @@ public:
     limit_switch_pub_   = create_publisher<std_msgs::msg::Bool>("swiftpro/limit_switch", 10);
     mode_pub_           = create_publisher<std_msgs::msg::Int8>("swiftpro/mode", 10);
 
-    // ── Services ────────────────────────────────────────────────────────────
-    move_to_srv_ = create_service<swiftpro_resources::srv::MoveTo>(
-      "swiftpro/move_to",
-      std::bind(&SwiftProHardware::handle_move_to, this,
-                std::placeholders::_1, std::placeholders::_2));
+    // ── Action server ────────────────────────────────────────────────────────
+    // Each accepted goal runs execute_move_arm in its own thread so the action
+    // server remains responsive to new goals and cancels during execution.
+    move_arm_server_ = rclcpp_action::create_server<MoveArm>(
+      this,
+      "swiftpro/move_arm",
+      std::bind(&SwiftProHardware::handle_goal,     this,
+                std::placeholders::_1, std::placeholders::_2),
+      std::bind(&SwiftProHardware::handle_cancel,   this,
+                std::placeholders::_1),
+      std::bind(&SwiftProHardware::handle_accepted, this,
+                std::placeholders::_1));
 
+    // ── Services ────────────────────────────────────────────────────────────
     set_pump_srv_ = create_service<swiftpro_resources::srv::SetPump>(
       "swiftpro/set_pump",
       std::bind(&SwiftProHardware::handle_set_pump, this,
@@ -222,8 +242,8 @@ public:
       std::bind(&SwiftProHardware::check_connection, this));
 
     RCLCPP_INFO(get_logger(),
-                "SwiftPro hardware node ready — port=%s rate=%.1fHz",
-                port_.c_str(), publish_rate);
+                "SwiftPro hardware node ready — port=%s rate=%.1fHz tolerance=%.1fmm",
+                port_.c_str(), publish_rate, move_tolerance_mm_);
   }
 
   ~SwiftProHardware()
@@ -425,49 +445,156 @@ private:
   }
 
   // ---------------------------------------------------------------------------
-  // Service handlers — motion
+  // Action server — MoveArm
   // ---------------------------------------------------------------------------
 
-  void handle_move_to(
-    const std::shared_ptr<swiftpro_resources::srv::MoveTo::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::MoveTo::Response> response)
+  rclcpp_action::GoalResponse handle_goal(
+    const rclcpp_action::GoalUUID& /*uuid*/,
+    std::shared_ptr<const MoveArm::Goal> goal)
   {
     if (!swift_ || !swift_->connected)
     {
-      response->success    = false;
-      response->error_code = -1;
-      response->message    = "Arm not connected";
-      return;
+      RCLCPP_WARN(get_logger(), "move_arm: rejected — arm not connected");
+      return rclcpp_action::GoalResponse::REJECT;
     }
 
     RCLCPP_INFO(get_logger(),
-                "move_to: x=%.1f y=%.1f z=%.1f speed=%.0f wait=%s",
-                request->x, request->y, request->z, request->speed,
-                request->wait ? "true" : "false");
+                "move_arm: goal received x=%.1f y=%.1f z=%.1f speed=%.0f",
+                goal->x, goal->y, goal->z, goal->speed);
 
-    const int result = swift_->set_position(
-      request->x, request->y, request->z,
-      static_cast<long>(request->speed),
-      false,
-      request->wait);
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
 
-    if (request->wait) {
-      // Synchronous path: set_position blocks until the firmware acknowledges
-      // the move. The return code is meaningful — 0 = success, non-zero = failure.
-      response->success    = (result == 0);
-      response->error_code = result;
-      response->message    = (result == 0) ? "OK" : "Movement failed";
-    } else {
-      // Asynchronous path: set_position fires the serial command and returns
-      // immediately, before the firmware has acknowledged anything. The uarm
-      // library unconditionally returns -1 in this case — it carries no
-      // information about whether the move will succeed. Physical movement is
-      // verified by reading /swiftpro/position after an appropriate settle time.        
-      response->success    = true;
-      response->error_code = 0;
-      response->message    = "OK";
+  rclcpp_action::CancelResponse handle_cancel(
+    const std::shared_ptr<GoalHandleMoveArm> /*goal_handle*/)
+  {
+    RCLCPP_INFO(get_logger(), "move_arm: cancel requested");
+    return rclcpp_action::CancelResponse::ACCEPT;
+  }
+
+  void handle_accepted(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
+  {
+    // Execute in a detached thread — do not block the action server
+    std::thread(
+      std::bind(&SwiftProHardware::execute_move_arm, this, goal_handle)
+    ).detach();
+  }
+
+  void execute_move_arm(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
+  {
+    const auto goal     = goal_handle->get_goal();
+    auto       feedback = std::make_shared<MoveArm::Feedback>();
+    auto       result   = std::make_shared<MoveArm::Result>();
+
+    // Fire the move asynchronously — do not block here.
+    // The uarm library returns -1 immediately in async mode regardless of outcome;
+    // completion is detected by polling get_is_moving().
+    swift_->set_position(
+      goal->x, goal->y, goal->z,
+      static_cast<long>(goal->speed),
+      false,   // relative
+      false);  // wait
+
+    // Poll at 10 Hz — publish feedback, check for cancel
+    constexpr auto poll_interval = std::chrono::milliseconds(100);
+    constexpr int  max_polls     = 300;  // 30 second timeout
+
+    for (int i = 0; i < max_polls; ++i)
+    {
+      std::this_thread::sleep_for(poll_interval);
+
+      // ── Cancel check ───────────────────────────────────────────────────
+      if (goal_handle->is_canceling())
+      {
+        // Best-effort stop: flush queue, then command current position
+        swift_->flush_cmd();
+        {
+          std::lock_guard<std::mutex> lock(position_mutex_);
+          if (current_position_.size() >= 3)
+          {
+            swift_->set_position(
+              current_position_[0], current_position_[1], current_position_[2],
+              static_cast<long>(goal->speed),
+              false, false);
+          }
+        }
+
+        result->success    = false;
+        result->error_code = -3;
+        result->message    = "Cancelled";
+        goal_handle->canceled(result);
+        RCLCPP_INFO(get_logger(), "move_arm: cancelled");
+        return;
+      }
+
+      // ── Publish feedback ───────────────────────────────────────────────
+      {
+        std::lock_guard<std::mutex> lock(position_mutex_);
+        if (current_position_.size() >= 3)
+        {
+          feedback->current_x = current_position_[0];
+          feedback->current_y = current_position_[1];
+          feedback->current_z = current_position_[2];
+          goal_handle->publish_feedback(feedback);
+        }
+      }
+
+      // ── Completion check ───────────────────────────────────────────────
+      const int moving = swift_->get_is_moving();
+      if (moving == 0)
+      {
+        break;
+      }
+    }
+
+    // ── Verify final position ──────────────────────────────────────────────
+    // Read actual position and compare against goal within tolerance.
+    float actual_x{0.0f}, actual_y{0.0f}, actual_z{0.0f};
+    {
+      std::lock_guard<std::mutex> lock(position_mutex_);
+      if (current_position_.size() >= 3)
+      {
+        actual_x = current_position_[0];
+        actual_y = current_position_[1];
+        actual_z = current_position_[2];
+      }
+    }
+
+    const float dx = std::abs(actual_x - goal->x);
+    const float dy = std::abs(actual_y - goal->y);
+    const float dz = std::abs(actual_z - goal->z);
+    const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+    const bool  in_tolerance = (dist <= static_cast<float>(move_tolerance_mm_));
+
+    if (goal_handle->is_active())
+    {
+      result->success    = in_tolerance;
+      result->error_code = in_tolerance ? 0 : -2;
+      if (in_tolerance)
+      {
+        result->message = "OK";
+      }
+      else
+      {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+          "Position tolerance exceeded: dist=%.1fmm (tol=%.1fmm) "
+          "actual=(%.1f,%.1f,%.1f)",
+          dist, move_tolerance_mm_, actual_x, actual_y, actual_z);
+        result->message = buf;
+      }
+
+      goal_handle->succeed(result);
+      RCLCPP_INFO(get_logger(),
+                  "move_arm: %s dist=%.1fmm actual=(%.1f,%.1f,%.1f)",
+                  in_tolerance ? "succeeded" : "failed",
+                  dist, actual_x, actual_y, actual_z);
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Service handlers — motion
+  // ---------------------------------------------------------------------------
 
   void handle_set_polar(
     const std::shared_ptr<swiftpro_resources::srv::SetPolar::Request>  request,
@@ -660,7 +787,6 @@ private:
       return;
     }
 
-    // API returns 0=attached, 1=detached, -1=failed
     const int result      = swift_->get_servo_attach(request->servo_id);
     response->success     = (result >= 0);
     response->attached    = (result == 0);
@@ -785,8 +911,9 @@ private:
   std::string                  port_;
   int                          baudrate_;
   double                       position_report_interval_;
+  double                       move_tolerance_mm_;
 
-  // Position state — written from uarm callback thread, read from timer thread
+  // Position state — written from uarm callback thread, read from timer/action threads
   std::mutex         position_mutex_;
   std::vector<float> current_position_;
 
@@ -804,8 +931,10 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr           limit_switch_pub_;
   rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr           mode_pub_;
 
+  // Action server
+  rclcpp_action::Server<MoveArm>::SharedPtr move_arm_server_;
+
   // Services
-  rclcpp::Service<swiftpro_resources::srv::MoveTo>::SharedPtr              move_to_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetPump>::SharedPtr             set_pump_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetGripper>::SharedPtr          set_gripper_srv_;
   rclcpp::Service<swiftpro_resources::srv::Reset>::SharedPtr               reset_srv_;
