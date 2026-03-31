@@ -5,18 +5,30 @@
 #
 # Runtime entrypoint for the swiftros2_hardware container.
 # Sources ROS2 and the swiftros2 install overlay, then runs the node.
- 
-set -e
- 
+
 source /opt/ros/jazzy/setup.bash
- 
+
 if [ ! -f /opt/swiftros2/install/setup.bash ]; then
     echo "ERROR: /opt/swiftros2/install/setup.bash not found." >&2
     echo "  Have you run NF_06 (rsync) to deploy the built artifacts?" >&2
     exit 1
 fi
- 
+
 source /opt/swiftros2/install/setup.bash
- 
-exec ros2 run swiftpro_hardware swiftpro_hardware \
-    --ros-args -p port:=${SWIFTPRO_PORT}
+
+term_handler() {
+    if [ -n "${NODE_PID}" ]; then
+        kill -TERM "${NODE_PID}" 2>/dev/null
+        wait "${NODE_PID}"
+    fi
+}
+trap term_handler TERM
+trap term_handler INT
+
+NODE_PID=""
+
+ros2 run swiftpro_hardware swiftpro_hardware \
+    --ros-args -p port:=${SWIFTPRO_PORT} &
+
+NODE_PID=$!
+wait "${NODE_PID}"
