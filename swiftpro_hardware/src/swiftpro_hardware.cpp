@@ -45,6 +45,7 @@
 // The swiftpro_kinematics node computes end effector FK from these joints.
 
 // Standard library
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -79,6 +80,7 @@
 #include "swiftpro_resources/srv/set_polar.hpp"
 #include "swiftpro_resources/srv/set_pump.hpp"
 #include "swiftpro_resources/srv/set_servo_angle.hpp"
+#include "swiftpro_resources/srv/set_servo_angles.hpp"
 #include "swiftpro_resources/srv/set_servo_attach.hpp"
 #include "swiftpro_resources/srv/set_wrist.hpp"
 
@@ -187,6 +189,11 @@ public:
     set_servo_angle_srv_ = create_service<swiftpro_resources::srv::SetServoAngle>(
       "swiftpro/set_servo_angle",
       std::bind(&SwiftProHardware::handle_set_servo_angle, this,
+                std::placeholders::_1, std::placeholders::_2));
+                
+    set_servo_angles_srv_ = create_service<swiftpro_resources::srv::SetServoAngles>(
+      "swiftpro/set_servo_angles",
+      std::bind(&SwiftProHardware::handle_set_servo_angles, this,
                 std::placeholders::_1, std::placeholders::_2));
 
     set_buzzer_srv_ = create_service<swiftpro_resources::srv::SetBuzzer>(
@@ -460,6 +467,18 @@ private:
       return rclcpp_action::GoalResponse::REJECT;
     }
 
+    // Atomically set goal_active_ and reject if it was already set.
+    // Using exchange() here (not in handle_accepted) ensures the guard is
+    // in place before ACCEPT_AND_EXECUTE is returned — closing the race
+    // window that caused "Failed to accept new goal" crashes when a client
+    // sent a new goal before the previous execute thread had fully exited.
+    if (goal_active_.exchange(true))
+    {
+      RCLCPP_WARN(get_logger(),
+                  "move_arm: rejected — previous goal still executing");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
     RCLCPP_INFO(get_logger(),
                 "move_arm: goal received x=%.1f y=%.1f z=%.1f speed=%.0f",
                 goal->x, goal->y, goal->z, goal->speed);
@@ -476,10 +495,9 @@ private:
 
   void handle_accepted(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
   {
-    // Execute in a detached thread — do not block the action server
-    std::thread(
-      std::bind(&SwiftProHardware::execute_move_arm, this, goal_handle)
-    ).detach();
+      std::thread(
+        std::bind(&SwiftProHardware::execute_move_arm, this, goal_handle)
+      ).detach();
   }
 
   void execute_move_arm(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
@@ -529,6 +547,7 @@ private:
         result->message    = "Cancelled";
         goal_handle->canceled(result);
         RCLCPP_INFO(get_logger(), "move_arm: cancelled");
+        goal_active_.store(false);
         return;
       }
 
@@ -588,13 +607,18 @@ private:
           dist, move_tolerance_mm_, actual_x, actual_y, actual_z);
         result->message = buf;
       }
-
+      // Brief pause ensures the action server state machine has fully
+      // transitioned before we call succeed(). Without this, rapid
+      // consecutive goals crash with "Failed to accept new goal" when
+      // the previous goal failed immediately (arm unreachable).
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
       goal_handle->succeed(result);
       RCLCPP_INFO(get_logger(),
                   "move_arm: %s dist=%.1fmm actual=(%.1f,%.1f,%.1f)",
                   in_tolerance ? "succeeded" : "failed",
                   dist, actual_x, actual_y, actual_z);
     }
+    goal_active_.store(false);
   }
 
   // ---------------------------------------------------------------------------
@@ -672,6 +696,78 @@ private:
                 "set_servo_angle: servo=%d angle=%.1f result=%d",
                 request->servo_id, request->angle, result);
   }
+
+void handle_set_servo_angles(
+  const std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Request>  request,
+        std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Response> response)
+{
+  RCLCPP_INFO(get_logger(),
+              "set_servo_angles: request j1=%.1f j2=%.1f j3=%.1f speed=%d wait=%d",
+              request->j1, request->j2, request->j3, request->speed, request->wait);
+
+  if (!swift_ || !swift_->connected)
+  {
+    RCLCPP_WARN(get_logger(), "set_servo_angles: arm not connected");
+    response->success = false;
+    return;
+  }
+
+  const long spd  = (request->speed > 0) ? static_cast<long>(request->speed) : default_speed;
+  bool ok = true;
+  int  result;
+
+  if (request->j1 >= 0.0f)
+{
+    result = swift_->set_servo_angle(0, request->j1, spd, false);
+    RCLCPP_INFO(get_logger(),
+                "set_servo_angles: j1=%.1f speed=%ld result=%d", request->j1, spd, result);
+}
+
+if (request->j2 >= 0.0f)
+{
+    result = swift_->set_servo_angle(1, request->j2, spd, false);
+    RCLCPP_INFO(get_logger(),
+                "set_servo_angles: j2=%.1f speed=%ld result=%d", request->j2, spd, result);
+}
+
+if (request->j3 >= 0.0f)
+{
+    result = swift_->set_servo_angle(2, request->j3, spd, false);
+    RCLCPP_INFO(get_logger(),
+                "set_servo_angles: j3=%.1f speed=%ld result=%d", request->j3, spd, result);
+}
+
+  // If wait requested, poll is_moving until arm stops or timeout
+  if (request->wait && ok)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    constexpr auto timeout   = std::chrono::seconds(15);
+    constexpr auto poll_step = std::chrono::milliseconds(100);
+    const auto     start     = std::chrono::steady_clock::now();
+
+    while (true)
+    {
+      const int moving = swift_->get_is_moving();
+      if (moving == 0)
+      {
+        RCLCPP_DEBUG(get_logger(), "set_servo_angles: motion complete");
+        break;
+      }
+      if (std::chrono::steady_clock::now() - start > timeout)
+      {
+        RCLCPP_WARN(get_logger(), "set_servo_angles: wait timeout");
+        ok = false;
+        break;
+      }
+      std::this_thread::sleep_for(poll_step);
+    }
+  }
+
+  response->success = ok;
+  RCLCPP_INFO(get_logger(),
+              "set_servo_angles: complete success=%s", ok ? "true" : "false");
+}
 
   void handle_reset(
     const std::shared_ptr<swiftpro_resources::srv::Reset::Request>  request,
@@ -938,6 +1034,8 @@ private:
 
   // Action server
   rclcpp_action::Server<MoveArm>::SharedPtr move_arm_server_;
+  std::atomic<bool>                         goal_active_{false};
+  std::thread                               execute_thread_;
 
   // Services
   rclcpp::Service<swiftpro_resources::srv::SetPump>::SharedPtr             set_pump_srv_;
@@ -948,6 +1046,7 @@ private:
   rclcpp::Service<swiftpro_resources::srv::SetMode>::SharedPtr             set_mode_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetPolar>::SharedPtr            set_polar_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetServoAngle>::SharedPtr       set_servo_angle_srv_;
+  rclcpp::Service<swiftpro_resources::srv::SetServoAngles>::SharedPtr      set_servo_angles_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetBuzzer>::SharedPtr           set_buzzer_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetAcceleration>::SharedPtr     set_acceleration_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetDigitalOutput>::SharedPtr    set_digital_output_srv_;

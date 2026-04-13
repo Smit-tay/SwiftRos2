@@ -32,6 +32,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "messaging/srv/SetMode.srv"
   "messaging/srv/SetPolar.srv"
   "messaging/srv/SetServoAngle.srv"
+  "messaging/srv/SetServoAngles.srv"
   "messaging/srv/SetServoAttach.srv"
   "messaging/srv/SetWrist.srv"
   DEPENDENCIES geometry_msgs std_msgs
