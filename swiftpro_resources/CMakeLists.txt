@@ -22,6 +22,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "messaging/srv/SetGripper.srv"
   "messaging/srv/SetPump.srv"
   # Services — new
+  "messaging/srv/ComputeFK.srv"
+  "messaging/srv/ComputeIK.srv"
   "messaging/srv/GetAnalog.srv"
   "messaging/srv/GetDigital.srv"
   "messaging/srv/GetServoAttach.srv"
@@ -35,8 +37,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "messaging/srv/SetServoAngles.srv"
   "messaging/srv/SetServoAttach.srv"
   "messaging/srv/SetWrist.srv"
+  "messaging/srv/SmoothMove.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
+ament_export_include_directories(include)
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

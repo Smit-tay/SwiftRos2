@@ -10,6 +10,8 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+
+find_package(swiftpro_kinematics REQUIRED)
 find_package(swiftpro_resources REQUIRED)
 
 # -----------------------------------------------------------------------------
@@ -29,6 +31,7 @@ add_executable(swiftpro_hardware src/swiftpro_hardware.cpp)
 target_include_directories(swiftpro_hardware
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/include
+    ${swiftpro_kinematics_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(swiftpro_hardware
@@ -37,6 +40,7 @@ ament_target_dependencies(swiftpro_hardware
   rclcpp_action
   sensor_msgs
   std_msgs
+  swiftpro_kinematics
   swiftpro_resources
 )
 

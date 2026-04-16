@@ -2,186 +2,160 @@
 // Copyright 2025 Jack Sidman Smith
 // Licensed under the MIT License. See LICENSE in project root.
 //
-// Forward kinematics node for the UArm Swift Pro.
+// Kinematics node for the UArm Swift Pro.
+// Pure computation — does NOT command the arm to move.
 //
-// This node subscribes to /joint_states (Joint1, Joint2, Joint3 from the
-// hardware node) and computes the Cartesian position of the end effector
-// analytically using the Denavit-Hartenberg parameters derived from the
-// URDF link geometry.
+// Publishes:
+//   /swiftpro/end_effector_position  geometry_msgs/PointStamped
+//     Live FK result from current joint states. Firmware-frame XYZ (mm).
 //
-// It publishes the result on /swiftpro/end_effector_position so that any
-// consumer (TopicFS, web dashboard, SteampunkClock) can read the current
-// tip position without needing to query TF.
+// Services:
+//   /swiftpro/compute_fk  swiftpro_resources/srv/ComputeFK
+//     Joint angles (firmware degrees) → Cartesian XYZ (mm).
 //
-// It does NOT broadcast TF transforms — that is robot_state_publisher's job.
-// These two nodes are fully compatible and complementary:
-//   robot_state_publisher  → visualization (RViz, TF tree)
-//   swiftpro_kinematics    → analytical FK → Cartesian position topic
+//   /swiftpro/compute_ik  swiftpro_resources/srv/ComputeIK
+//     Cartesian XYZ (mm) → joint angles (firmware degrees).
 //
-// Learning note:
-//   Forward kinematics answers: "given these joint angles, where is the
-//   end effector in Cartesian space?"
-//   The approach used here is geometric FK — building up the position
-//   by projecting each link length through the accumulated joint angles.
-//   This is equivalent to the Denavit-Hartenberg method for this arm
-//   topology but expressed more intuitively.
+// ─────────────────────────────────────────────────────────────────────────────
+// KINEMATIC MODEL — see kinematics.hpp for full documentation
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The parallel linkage decouples the forearm world angle from J2.
+// Forearm world angle depends ONLY on J3.
+// Parameters calibrated from 16-point commanded sweep, RMS = 0.27mm.
+//
+// Firmware angle conventions (degrees, zero offsets):
+//   J1: 90° = arm pointing along +X (forward). azimuth = J1 - 90°.
+//   J2: upper arm angle above horizontal.
+//   J3: forearm downward angle from horizontal. 0°=horizontal, +°=down.
 
 #include <cmath>
+#include <memory>
 #include <string>
-#include <vector>
 
-#include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
-// -----------------------------------------------------------------------------
-// Link geometry — all values taken directly from swiftpro.xacro joint origins.
-// Units: metres, radians.
-// -----------------------------------------------------------------------------
+#include "swiftpro_kinematics/kinematics.hpp"
+#include "swiftpro_resources/srv/compute_fk.hpp"
+#include "swiftpro_resources/srv/compute_ik.hpp"
 
-// Height of Joint1 (base rotation) above the ground plane
-static constexpr double BASE_HEIGHT    = 0.0723;
+namespace kin = swiftpro::kinematics;
 
-// Joint1 → Joint2 offset (Joint2 is forward and up from Joint1)
-static constexpr double J1_TO_J2_X    = 0.0132;
-static constexpr double J1_TO_J2_Z    = 0.0333;
-
-// Upper arm length: Joint2 → Joint3
-static constexpr double UPPER_ARM_LEN = 0.14207;
-
-// Forearm length: Joint3 → Joint8 (end effector mount)
-static constexpr double FOREARM_LEN   = 0.15852;
-
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// ROS2 node
+// ─────────────────────────────────────────────────────────────────────────────
 
 class SwiftProKinematics : public rclcpp::Node
 {
 public:
-  SwiftProKinematics() : Node("swiftpro_kinematics")
-  {
-    end_effector_pub_ = create_publisher<geometry_msgs::msg::PointStamped>(
-      "swiftpro/end_effector_position", 10);
+    SwiftProKinematics()
+    : Node("swiftpro_kinematics")
+    {
+        // ── Subscriber: joint states from hardware node ───────────────────────
+        js_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+            "joint_states", 10,
+            std::bind(&SwiftProKinematics::on_joint_states, this,
+                      std::placeholders::_1));
 
-    joint_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "joint_states", 10,
-      std::bind(&SwiftProKinematics::on_joint_state, this,
-                std::placeholders::_1));
+        // ── Publisher: live end effector position ────────────────────────────
+        ee_pub_ = create_publisher<geometry_msgs::msg::PointStamped>(
+            "swiftpro/end_effector_position", 10);
 
-    RCLCPP_INFO(get_logger(),
-                "SwiftPro kinematics node started — publishing FK on "
-                "/swiftpro/end_effector_position");
-  }
+        // ── Service: compute FK ──────────────────────────────────────────────
+        fk_srv_ = create_service<swiftpro_resources::srv::ComputeFK>(
+            "swiftpro/compute_fk",
+            std::bind(&SwiftProKinematics::handle_compute_fk, this,
+                      std::placeholders::_1, std::placeholders::_2));
+
+        // ── Service: compute IK ──────────────────────────────────────────────
+        ik_srv_ = create_service<swiftpro_resources::srv::ComputeIK>(
+            "swiftpro/compute_ik",
+            std::bind(&SwiftProKinematics::handle_compute_ik, this,
+                      std::placeholders::_1, std::placeholders::_2));
+
+        RCLCPP_INFO(get_logger(),
+                    "swiftpro_kinematics ready — built %s %s",
+                    __DATE__, __TIME__);
+        RCLCPP_INFO(get_logger(),
+                    "FK params: L1=%.2f L2=%.2f SH_Z=%.2f DX=%.2f DZ=%.2f",
+                    kin::L1, kin::L2, kin::SH_Z, kin::DX, kin::DZ);
+        RCLCPP_INFO(get_logger(),
+                    "IK limits: Z_MIN=%.1f Z_MAX=%.1f J3_MAX=%.1f J2_MIN=%.1f",
+                    kin::Z_MIN, kin::Z_MAX, kin::J3_MAX, kin::J2_MIN);
+    }
 
 private:
-  // ---------------------------------------------------------------------------
-  // Retrieve a named joint position from a JointState message.
-  // Returns 0.0 and warns (once) if the joint is not present.
-  // ---------------------------------------------------------------------------
-  double get_joint(
-    const sensor_msgs::msg::JointState::SharedPtr& msg,
-    const std::string& name) const
-  {
-    auto it = std::find(msg->name.begin(), msg->name.end(), name);
-    if (it == msg->name.end())
+    // ── Joint state callback — publish live FK ────────────────────────────────
+    void on_joint_states(const sensor_msgs::msg::JointState::SharedPtr msg)
     {
-      RCLCPP_WARN_ONCE(get_logger(),
-                       "Joint '%s' not found in /joint_states", name.c_str());
-      return 0.0;
+        if (msg->position.size() < 3) { return; }
+
+        // Hardware node publishes radians — convert to firmware degrees
+        const double j1 = msg->position[0] * (180.0 / M_PI);
+        const double j2 = msg->position[1] * (180.0 / M_PI);
+        const double j3 = msg->position[2] * (180.0 / M_PI);
+
+        double x, y, z;
+        kin::fk(j1, j2, j3, x, y, z);
+
+        geometry_msgs::msg::PointStamped pt;
+        pt.header.stamp    = msg->header.stamp;
+        pt.header.frame_id = "base_link";
+        pt.point.x         = x;
+        pt.point.y         = y;
+        pt.point.z         = z;
+        ee_pub_->publish(pt);
     }
-    size_t idx = static_cast<size_t>(std::distance(msg->name.begin(), it));
-    if (idx >= msg->position.size())
+
+    // ── Service: compute FK ───────────────────────────────────────────────────
+    void handle_compute_fk(
+        const std::shared_ptr<swiftpro_resources::srv::ComputeFK::Request>  req,
+              std::shared_ptr<swiftpro_resources::srv::ComputeFK::Response> res)
     {
-      RCLCPP_WARN_ONCE(get_logger(),
-                       "Joint '%s' has no position value", name.c_str());
-      return 0.0;
+        kin::fk(req->j1, req->j2, req->j3, res->x, res->y, res->z);
+        res->success = true;
+        res->message = "OK";
+        RCLCPP_DEBUG(get_logger(),
+                     "compute_fk: J(%.1f,%.1f,%.1f) → (%.1f,%.1f,%.1f)",
+                     req->j1, req->j2, req->j3, res->x, res->y, res->z);
     }
-    return msg->position[idx];
-  }
 
-  // ---------------------------------------------------------------------------
-  // Forward kinematics callback
-  //
-  // The UArm Swift Pro is a 3-DOF arm. The base rotates around Z (Joint1).
-  // The shoulder (Joint2) and elbow (Joint3) both rotate around Y in the
-  // vertical plane of the arm.
-  //
-  // Step 1: Work in the arm's own vertical plane (ignoring base rotation).
-  //         Project upper arm and forearm lengths through the joint angles
-  //         to find the end effector position in the arm plane.
-  //
-  // Step 2: Rotate the arm-plane position around Z by the base angle (Joint1)
-  //         to get the final world-frame Cartesian position.
-  //
-  // The parallel linkage keeps the end effector level — it does not change
-  // the tip position, only the orientation. FK position is therefore computed
-  // from Joint1/2/3 alone, which is correct.
-  // ---------------------------------------------------------------------------
-  void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg)
-  {
-    const double theta1 = get_joint(msg, "Joint1");  // base rotation
-    const double theta2 = get_joint(msg, "Joint2");  // shoulder
-    const double theta3 = get_joint(msg, "Joint3");  // elbow
+    // ── Service: compute IK ───────────────────────────────────────────────────
+    void handle_compute_ik(
+        const std::shared_ptr<swiftpro_resources::srv::ComputeIK::Request>  req,
+              std::shared_ptr<swiftpro_resources::srv::ComputeIK::Response> res)
+    {
+        std::string msg;
+        res->success = kin::ik(req->x, req->y, req->z,
+                               res->j1, res->j2, res->j3, msg);
+        res->message = msg;
 
-    // ── Step 1: position in the arm's vertical plane ─────────────────────
-    //
-    // Joint2 and Joint3 both rotate around Y.
-    // The combined angle at the forearm tip is (theta2 + theta3).
-    //
-    // Horizontal reach from Joint2 pivot:
-    //   x_arm = L_upper * cos(theta2) + L_forearm * cos(theta2 + theta3)
-    //
-    // Vertical rise from Joint2 pivot:
-    //   z_arm = L_upper * sin(theta2) + L_forearm * sin(theta2 + theta3)
-    //
-    // Note: positive theta2 raises the arm (shoulder elevation),
-    //       positive theta3 raises the forearm relative to the upper arm.
+        if (res->success) {
+            RCLCPP_DEBUG(get_logger(),
+                         "compute_ik: (%.1f,%.1f,%.1f) → J(%.1f,%.1f,%.1f)",
+                         req->x, req->y, req->z, res->j1, res->j2, res->j3);
+        } else {
+            RCLCPP_WARN(get_logger(),
+                        "compute_ik: (%.1f,%.1f,%.1f) failed: %s",
+                        req->x, req->y, req->z, msg.c_str());
+        }
+    }
 
-    const double cos2  = std::cos(theta2);
-    const double sin2  = std::sin(theta2);
-    const double cos23 = std::cos(theta2 + theta3);
-    const double sin23 = std::sin(theta2 + theta3);
-
-    // Reach and height measured from the Joint2 pivot
-    const double reach_from_j2 = UPPER_ARM_LEN * cos2 + FOREARM_LEN * cos23;
-    const double rise_from_j2  = UPPER_ARM_LEN * sin2 + FOREARM_LEN * sin23;
-
-    // Total horizontal reach from the arm centre axis (add the J1→J2 offset)
-    const double total_reach = J1_TO_J2_X + reach_from_j2;
-
-    // Total height above ground
-    const double z = BASE_HEIGHT + J1_TO_J2_Z + rise_from_j2;
-
-    // ── Step 2: rotate around Z by theta1 ────────────────────────────────
-    //
-    // The arm plane is aligned with the X axis at theta1 = 0.
-    // Rotating by theta1 gives us world-frame X and Y.
-
-    const double x = total_reach * std::cos(theta1);
-    const double y = total_reach * std::sin(theta1);
-
-    // ── Publish ───────────────────────────────────────────────────────────
-    geometry_msgs::msg::PointStamped pt;
-    pt.header.stamp    = msg->header.stamp;
-    pt.header.frame_id = "Base";
-    pt.point.x = x;
-    pt.point.y = y;
-    pt.point.z = z;
-
-    end_effector_pub_->publish(pt);
-
-    RCLCPP_DEBUG(get_logger(),
-                 "FK: θ1=%.3f θ2=%.3f θ3=%.3f → x=%.4f y=%.4f z=%.4f",
-                 theta1, theta2, theta3, x, y, z);
-  }
-
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr end_effector_pub_;
+    // ── Members ───────────────────────────────────────────────────────────────
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr js_sub_;
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr ee_pub_;
+    rclcpp::Service<swiftpro_resources::srv::ComputeFK>::SharedPtr fk_srv_;
+    rclcpp::Service<swiftpro_resources::srv::ComputeIK>::SharedPtr ik_srv_;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[])
 {
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<SwiftProKinematics>());
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<SwiftProKinematics>());
+    rclcpp::shutdown();
+    return 0;
 }

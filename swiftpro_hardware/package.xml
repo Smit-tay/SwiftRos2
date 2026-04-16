@@ -13,6 +13,7 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>swiftpro_kinematics</depend>
   <depend>swiftpro_resources</depend>
 
   <export>

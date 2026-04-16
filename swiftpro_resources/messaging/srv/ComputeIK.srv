@@ -1,0 +1,17 @@
+# ComputeIk.srv
+# Copyright 2025 Jack Sidman Smith
+# Licensed under the MIT License.
+#
+# Inverse kinematics: Cartesian XYZ (mm) → joint angles (firmware degrees).
+# Does not move the arm. Pure computation.
+# Coordinates are in firmware frame: X forward, Y left, Z up from table.
+
+float64 x     # mm  firmware frame
+float64 y     # mm  firmware frame
+float64 z     # mm  firmware frame
+---
+float64 j1    # firmware degrees
+float64 j2    # firmware degrees
+float64 j3    # firmware degrees
+bool    success
+string  message

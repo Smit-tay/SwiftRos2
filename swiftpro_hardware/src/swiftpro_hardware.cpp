@@ -39,6 +39,7 @@
 //     /swiftpro/get_digital      swiftpro_resources/srv/GetDigital
 //     /swiftpro/get_analog       swiftpro_resources/srv/GetAnalog
 //     /swiftpro/get_servo_attach swiftpro_resources/srv/GetServoAttach
+//     /swiftpro/smooth_move      swiftpro_resources/srv/SmoothMove
 //
 // Joint names Joint1/Joint2/Joint3 match the URDF joint names in swiftpro.xacro exactly.
 // robot_state_publisher computes Joint4-Joint8 via <mimic> tags.
@@ -83,34 +84,37 @@
 #include "swiftpro_resources/srv/set_servo_angles.hpp"
 #include "swiftpro_resources/srv/set_servo_attach.hpp"
 #include "swiftpro_resources/srv/set_wrist.hpp"
+#include "swiftpro_resources/srv/smooth_move.hpp"
+
+// Kinematics — FK/IK shared with swiftpro_kinematics node
+#include "swiftpro_kinematics/kinematics.hpp"
+
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
 
-// Joint names must match the URDF joint names in swiftpro.xacro exactly.
-// robot_state_publisher uses these names to look up mimic relationships.
 static const std::vector<std::string> DRIVEN_JOINT_NAMES = {
-  "Joint1",   // base rotation   — servo 0
-  "Joint2",   // shoulder        — servo 1
-  "Joint3"    // elbow/forearm   — servo 2
+  "Joint1",
+  "Joint2",
+  "Joint3"
 };
 
-static constexpr double DEG_TO_RAD = M_PI / 180.0;
+static constexpr double DEG_TO_RAD  = M_PI / 180.0;
+// default_speed = 10000 defined in uarm/uarm.h
 
 // -----------------------------------------------------------------------------
 
 class SwiftProHardware : public rclcpp::Node
 {
 public:
-  using MoveArm        = swiftpro_resources::action::MoveArm;
+  using MoveArm           = swiftpro_resources::action::MoveArm;
   using GoalHandleMoveArm = rclcpp_action::ServerGoalHandle<MoveArm>;
 
   SwiftProHardware()
   : Node("swiftpro_hardware")
   , swift_(nullptr)
   {
-    // Must be set before connect() — callbacks use it
     instance_ = this;
 
     // ── Parameters ──────────────────────────────────────────────────────────
@@ -120,11 +124,11 @@ public:
     declare_parameter<double>("joint_state_publish_rate", 10.0);
     declare_parameter<double>("move_tolerance_mm", 15.0);
 
-    port_                      = get_parameter("port").as_string();
-    baudrate_                  = get_parameter("baudrate").as_int();
-    position_report_interval_  = get_parameter("position_report_interval").as_double();
-    const double publish_rate  = get_parameter("joint_state_publish_rate").as_double();
-    move_tolerance_mm_         = get_parameter("move_tolerance_mm").as_double();
+    port_                     = get_parameter("port").as_string();
+    baudrate_                 = get_parameter("baudrate").as_int();
+    position_report_interval_ = get_parameter("position_report_interval").as_double();
+    const double publish_rate = get_parameter("joint_state_publish_rate").as_double();
+    move_tolerance_mm_        = get_parameter("move_tolerance_mm").as_double();
 
     // ── Publishers ──────────────────────────────────────────────────────────
     joint_state_pub_    = create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
@@ -138,8 +142,6 @@ public:
     mode_pub_           = create_publisher<std_msgs::msg::Int8>("swiftpro/mode", 10);
 
     // ── Action server ────────────────────────────────────────────────────────
-    // Each accepted goal runs execute_move_arm in its own thread so the action
-    // server remains responsive to new goals and cancels during execution.
     move_arm_server_ = rclcpp_action::create_server<MoveArm>(
       this,
       "swiftpro/move_arm",
@@ -190,7 +192,7 @@ public:
       "swiftpro/set_servo_angle",
       std::bind(&SwiftProHardware::handle_set_servo_angle, this,
                 std::placeholders::_1, std::placeholders::_2));
-                
+
     set_servo_angles_srv_ = create_service<swiftpro_resources::srv::SetServoAngles>(
       "swiftpro/set_servo_angles",
       std::bind(&SwiftProHardware::handle_set_servo_angles, this,
@@ -231,8 +233,15 @@ public:
       std::bind(&SwiftProHardware::handle_get_servo_attach, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    smooth_move_srv_ = create_service<swiftpro_resources::srv::SmoothMove>(
+      "swiftpro/smooth_move",
+      std::bind(&SwiftProHardware::handle_smooth_move, this,
+                std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(get_logger(),
-                "SwiftPro hardware node —   Jack Sidman Smith - built %s %s", __DATE__, __TIME__);
+                "SwiftPro hardware node —   Jack Sidman Smith - built %s %s",
+                __DATE__, __TIME__);
+
     // ── Connect to arm ───────────────────────────────────────────────────────
     connect();
 
@@ -245,7 +254,6 @@ public:
       publish_period,
       std::bind(&SwiftProHardware::publish_state, this));
 
-    // Connection watchdog — reconnects automatically if arm is unplugged
     watchdog_timer_ = create_wall_timer(
       std::chrono::seconds(5),
       std::bind(&SwiftProHardware::check_connection, this));
@@ -257,10 +265,7 @@ public:
 
   ~SwiftProHardware()
   {
-    if (swift_ && swift_->connected)
-    {
-      swift_->disconnect();
-    }
+    if (swift_ && swift_->connected) { swift_->disconnect(); }
     instance_ = nullptr;
   }
 
@@ -284,12 +289,8 @@ private:
         return;
       }
 
-      // Allow arm firmware to stabilise before enabling position reporting
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-      // Register callbacks.
-      // The uarm API requires raw C function pointers — static trampolines
-      // forward to instance methods. instance_ is set before connect() is called.
       swift_->register_report_position_callback(
         SwiftProHardware::position_callback);
       swift_->register_limit_switch_callback(
@@ -300,7 +301,6 @@ private:
       RCLCPP_DEBUG(get_logger(),
                    "connect: set_report_position returned %d", ret);
 
-      // Log device info
       std::string* info = swift_->get_device_info();
       if (info)
       {
@@ -330,7 +330,6 @@ private:
                   "check_connection: arm disconnected — attempting reconnect");
       connect();
     }
-
     std_msgs::msg::Bool msg;
     msg.data = connected;
     connected_pub_->publish(msg);
@@ -338,9 +337,6 @@ private:
 
   // ---------------------------------------------------------------------------
   // Callback trampolines
-  //
-  // The uarm library calls raw C function pointers from its own thread.
-  // Static functions forward to the single node instance.
   // ---------------------------------------------------------------------------
 
   static void position_callback(std::vector<float> position)
@@ -369,15 +365,12 @@ private:
 
   // ---------------------------------------------------------------------------
   // State publishing
-  //
-  // Called by publish_timer_ at joint_state_publish_rate Hz.
   // ---------------------------------------------------------------------------
 
   void publish_state()
   {
     if (!swift_ || !swift_->connected) { return; }
 
-    // ── JointState — the three driven joints only ──────────────────────────
     const auto angles = swift_->get_servo_angle();
     if (angles.size() >= 3)
     {
@@ -392,7 +385,6 @@ private:
       joint_state_pub_->publish(js);
     }
 
-    // ── XYZ position from firmware ─────────────────────────────────────────
     {
       std::lock_guard<std::mutex> lock(position_mutex_);
       if (current_position_.size() >= 3)
@@ -405,18 +397,16 @@ private:
       }
     }
 
-    // ── Polar position ─────────────────────────────────────────────────────
     const auto polar = swift_->get_polar();
     if (polar.size() >= 3)
     {
       geometry_msgs::msg::Point pt;
-      pt.x = static_cast<double>(polar[0]);   // stretch
-      pt.y = static_cast<double>(polar[1]);   // rotation
-      pt.z = static_cast<double>(polar[2]);   // height
+      pt.x = static_cast<double>(polar[0]);
+      pt.y = static_cast<double>(polar[1]);
+      pt.z = static_cast<double>(polar[2]);
       polar_pub_->publish(pt);
     }
 
-    // ── Pump status ────────────────────────────────────────────────────────
     const int pump = swift_->get_pump_status();
     if (pump >= 0)
     {
@@ -425,7 +415,6 @@ private:
       pump_status_pub_->publish(msg);
     }
 
-    // ── Gripper status ─────────────────────────────────────────────────────
     const int gripper = swift_->get_gripper_catch();
     if (gripper >= 0)
     {
@@ -434,7 +423,6 @@ private:
       gripper_status_pub_->publish(msg);
     }
 
-    // ── Is moving ─────────────────────────────────────────────────────────
     const int moving = swift_->get_is_moving();
     if (moving >= 0)
     {
@@ -443,7 +431,6 @@ private:
       is_moving_pub_->publish(msg);
     }
 
-    // ── Mode ───────────────────────────────────────────────────────────────
     const int mode = swift_->get_mode();
     if (mode >= 0)
     {
@@ -467,11 +454,6 @@ private:
       return rclcpp_action::GoalResponse::REJECT;
     }
 
-    // Atomically set goal_active_ and reject if it was already set.
-    // Using exchange() here (not in handle_accepted) ensures the guard is
-    // in place before ACCEPT_AND_EXECUTE is returned — closing the race
-    // window that caused "Failed to accept new goal" crashes when a client
-    // sent a new goal before the previous execute thread had fully exited.
     if (goal_active_.exchange(true))
     {
       RCLCPP_WARN(get_logger(),
@@ -495,9 +477,9 @@ private:
 
   void handle_accepted(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
   {
-      std::thread(
-        std::bind(&SwiftProHardware::execute_move_arm, this, goal_handle)
-      ).detach();
+    std::thread(
+      std::bind(&SwiftProHardware::execute_move_arm, this, goal_handle)
+    ).detach();
   }
 
   void execute_move_arm(const std::shared_ptr<GoalHandleMoveArm> goal_handle)
@@ -506,42 +488,30 @@ private:
     auto       feedback = std::make_shared<MoveArm::Feedback>();
     auto       result   = std::make_shared<MoveArm::Result>();
 
-    // Fire the move asynchronously — do not block here.
-    // The uarm library returns -1 immediately in async mode regardless of outcome;
-    // completion is detected by polling get_is_moving().
     swift_->set_position(
       goal->x, goal->y, goal->z,
       static_cast<long>(goal->speed),
-      false,   // relative
-      false);  // wait
+      false, false);
 
-    // Poll at 10 Hz — publish feedback, check for cancel
     constexpr auto poll_interval = std::chrono::milliseconds(100);
-    constexpr int  max_polls     = 300;  // 30 second timeout
+    constexpr int  max_polls     = 300;
 
     for (int i = 0; i < max_polls; ++i)
     {
       std::this_thread::sleep_for(poll_interval);
 
-      // ── Cancel check ───────────────────────────────────────────────────
       if (goal_handle->is_canceling())
       {
-        // Note: the uarm C++ SDK and SwiftPro firmware have no true stop command.
-        // M112 (Marlin emergency stop) was tested and does not halt motion.
-        // The arm will complete its current movement segment before stopping.
         swift_->flush_cmd();
-        
         {
           std::lock_guard<std::mutex> lock(position_mutex_);
           if (current_position_.size() >= 3)
           {
             swift_->set_position(
               current_position_[0], current_position_[1], current_position_[2],
-              static_cast<long>(goal->speed),
-              false, false);
+              static_cast<long>(goal->speed), false, false);
           }
         }
-
         result->success    = false;
         result->error_code = -3;
         result->message    = "Cancelled";
@@ -551,7 +521,6 @@ private:
         return;
       }
 
-      // ── Publish feedback ───────────────────────────────────────────────
       {
         std::lock_guard<std::mutex> lock(position_mutex_);
         if (current_position_.size() >= 3)
@@ -563,16 +532,9 @@ private:
         }
       }
 
-      // ── Completion check ───────────────────────────────────────────────
-      const int moving = swift_->get_is_moving();
-      if (moving == 0)
-      {
-        break;
-      }
+      if (swift_->get_is_moving() == 0) { break; }
     }
 
-    // ── Verify final position ──────────────────────────────────────────────
-    // Read actual position and compare against goal within tolerance.
     float actual_x{0.0f}, actual_y{0.0f}, actual_z{0.0f};
     {
       std::lock_guard<std::mutex> lock(position_mutex_);
@@ -584,22 +546,19 @@ private:
       }
     }
 
-    const float dx = std::abs(actual_x - goal->x);
-    const float dy = std::abs(actual_y - goal->y);
-    const float dz = std::abs(actual_z - goal->z);
+    const float dx   = std::abs(actual_x - goal->x);
+    const float dy   = std::abs(actual_y - goal->y);
+    const float dz   = std::abs(actual_z - goal->z);
     const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-    const bool  in_tolerance = (dist <= static_cast<float>(move_tolerance_mm_));
+    const bool  ok   = (dist <= static_cast<float>(move_tolerance_mm_));
 
     if (goal_handle->is_active())
     {
-      result->success    = in_tolerance;
-      result->error_code = in_tolerance ? 0 : -2;
-      if (in_tolerance)
-      {
+      result->success    = ok;
+      result->error_code = ok ? 0 : -2;
+      if (ok) {
         result->message = "OK";
-      }
-      else
-      {
+      } else {
         char buf[128];
         std::snprintf(buf, sizeof(buf),
           "Position tolerance exceeded: dist=%.1fmm (tol=%.1fmm) "
@@ -607,15 +566,11 @@ private:
           dist, move_tolerance_mm_, actual_x, actual_y, actual_z);
         result->message = buf;
       }
-      // Brief pause ensures the action server state machine has fully
-      // transitioned before we call succeed(). Without this, rapid
-      // consecutive goals crash with "Failed to accept new goal" when
-      // the previous goal failed immediately (arm unreachable).
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       goal_handle->succeed(result);
       RCLCPP_INFO(get_logger(),
                   "move_arm: %s dist=%.1fmm actual=(%.1f,%.1f,%.1f)",
-                  in_tolerance ? "succeeded" : "failed",
+                  ok ? "succeeded" : "failed",
                   dist, actual_x, actual_y, actual_z);
     }
     goal_active_.store(false);
@@ -626,166 +581,303 @@ private:
   // ---------------------------------------------------------------------------
 
   void handle_set_polar(
-    const std::shared_ptr<swiftpro_resources::srv::SetPolar::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetPolar::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetPolar::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetPolar::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result = swift_->set_polar(
-      request->stretch, request->rotation, request->height,
-      static_cast<long>(request->speed),
-      request->relative,
-      request->wait);
-
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = swift_->set_polar(
+      req->stretch, req->rotation, req->height,
+      static_cast<long>(req->speed), req->relative, req->wait);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(),
                 "set_polar: stretch=%.1f rotation=%.1f height=%.1f result=%d",
-                request->stretch, request->rotation, request->height, result);
+                req->stretch, req->rotation, req->height, r);
   }
 
   void handle_set_wrist(
-    const std::shared_ptr<swiftpro_resources::srv::SetWrist::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetWrist::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetWrist::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetWrist::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result = swift_->set_wrist(
-      request->angle,
-      static_cast<long>(request->speed));
-
-    response->success    = (result == 0);
-    response->error_code = result;
-
-    RCLCPP_INFO(get_logger(), "set_wrist: angle=%.1f result=%d",
-                request->angle, result);
+    const int r = swift_->set_wrist(req->angle, static_cast<long>(req->speed));
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "set_wrist: angle=%.1f result=%d", req->angle, r);
   }
 
   void handle_set_servo_angle(
-    const std::shared_ptr<swiftpro_resources::srv::SetServoAngle::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetServoAngle::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetServoAngle::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetServoAngle::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result = swift_->set_servo_angle(
-      request->servo_id,
-      request->angle,
-      static_cast<long>(request->speed),
-      request->wait);
-
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = swift_->set_servo_angle(
+      req->servo_id, req->angle, static_cast<long>(req->speed), req->wait);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(),
                 "set_servo_angle: servo=%d angle=%.1f result=%d",
-                request->servo_id, request->angle, result);
+                req->servo_id, req->angle, r);
   }
 
-void handle_set_servo_angles(
-  const std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Request>  request,
-        std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Response> response)
-{
-  RCLCPP_INFO(get_logger(),
-              "set_servo_angles: request j1=%.1f j2=%.1f j3=%.1f speed=%d wait=%d",
-              request->j1, request->j2, request->j3, request->speed, request->wait);
-
-  if (!swift_ || !swift_->connected)
+  void handle_set_servo_angles(
+    const std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Response> res)
   {
-    RCLCPP_WARN(get_logger(), "set_servo_angles: arm not connected");
-    response->success = false;
-    return;
-  }
-
-  const long spd  = (request->speed > 0) ? static_cast<long>(request->speed) : default_speed;
-  bool ok = true;
-  int  result;
-
-  if (request->j1 >= 0.0f)
-{
-    result = swift_->set_servo_angle(0, request->j1, spd, false);
     RCLCPP_INFO(get_logger(),
-                "set_servo_angles: j1=%.1f speed=%ld result=%d", request->j1, spd, result);
-}
+                "set_servo_angles: j1=%.1f j2=%.1f j3=%.1f speed=%d wait=%d",
+                req->j1, req->j2, req->j3, req->speed, req->wait);
 
-if (request->j2 >= 0.0f)
-{
-    result = swift_->set_servo_angle(1, request->j2, spd, false);
-    RCLCPP_INFO(get_logger(),
-                "set_servo_angles: j2=%.1f speed=%ld result=%d", request->j2, spd, result);
-}
+    if (!swift_ || !swift_->connected) {
+      RCLCPP_WARN(get_logger(), "set_servo_angles: arm not connected");
+      res->success = false; return;
+    }
 
-if (request->j3 >= 0.0f)
-{
-    result = swift_->set_servo_angle(2, request->j3, spd, false);
-    RCLCPP_INFO(get_logger(),
-                "set_servo_angles: j3=%.1f speed=%ld result=%d", request->j3, spd, result);
-}
+    const long spd = (req->speed > 0) ? static_cast<long>(req->speed) : default_speed;
+    bool ok = true;
+    int  r;
 
-  // If wait requested, poll is_moving until arm stops or timeout
-  if (request->wait && ok)
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    if (req->j1 >= 0.0f) {
+      r = swift_->set_servo_angle(0, req->j1, spd, false);
+      RCLCPP_INFO(get_logger(),
+                  "set_servo_angles: j1=%.1f speed=%ld result=%d", req->j1, spd, r);
+    }
+    if (req->j2 >= 0.0f) {
+      r = swift_->set_servo_angle(1, req->j2, spd, false);
+      RCLCPP_INFO(get_logger(),
+                  "set_servo_angles: j2=%.1f speed=%ld result=%d", req->j2, spd, r);
+    }
+    if (req->j3 >= 0.0f) {
+      r = swift_->set_servo_angle(2, req->j3, spd, false);
+      RCLCPP_INFO(get_logger(),
+                  "set_servo_angles: j3=%.1f speed=%ld result=%d", req->j3, spd, r);
+    }
 
-    constexpr auto timeout   = std::chrono::seconds(15);
-    constexpr auto poll_step = std::chrono::milliseconds(100);
-    const auto     start     = std::chrono::steady_clock::now();
-
-    while (true)
+    if (req->wait && ok)
     {
-      const int moving = swift_->get_is_moving();
-      if (moving == 0)
-      {
-        RCLCPP_DEBUG(get_logger(), "set_servo_angles: motion complete");
-        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      constexpr auto timeout   = std::chrono::seconds(15);
+      constexpr auto poll_step = std::chrono::milliseconds(100);
+      const auto     start     = std::chrono::steady_clock::now();
+      while (true) {
+        if (swift_->get_is_moving() == 0) { break; }
+        if (std::chrono::steady_clock::now() - start > timeout) {
+          RCLCPP_WARN(get_logger(), "set_servo_angles: wait timeout");
+          ok = false; break;
+        }
+        std::this_thread::sleep_for(poll_step);
       }
-      if (std::chrono::steady_clock::now() - start > timeout)
-      {
-        RCLCPP_WARN(get_logger(), "set_servo_angles: wait timeout");
-        ok = false;
-        break;
+    }
+
+    res->success = ok;
+    RCLCPP_INFO(get_logger(), "set_servo_angles: complete success=%s",
+                ok ? "true" : "false");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Service handler — smooth_move
+  //
+  // Moves the arm from current position to target via an automatic arc:
+  //
+  //   current → via → target
+  //
+  // The via point is the XY midpoint of current and target, lifted in Z:
+  //   via_x = (cur_x + tgt_x) / 2
+  //   via_y = (cur_y + tgt_y) / 2
+  //   via_z = max(cur_z, tgt_z) + lift   (default lift = 50mm)
+  //
+  // Each leg (current→via, via→target) is executed as a direct interpolated
+  // move using sine ease-in/ease-out in joint space. Step count scales with
+  // leg distance so short legs are fast and long legs are smooth.
+  //
+  // This produces a natural pick-and-place arc without the noise of the
+  // firmware's continuous servo correction trajectory planner.
+  // ---------------------------------------------------------------------------
+
+  // Execute one interpolated segment: current angles → target angles.
+  // Steps scale with tip distance for consistent apparent speed.
+  void execute_segment(double s_j1, double s_j2, double s_j3,
+                       double t_j1, double t_j2, double t_j3,
+                       double speed_mms)
+  {
+    namespace kin = swiftpro::kinematics;
+
+    double sx, sy, sz, tx, ty, tz;
+    kin::fk(s_j1, s_j2, s_j3, sx, sy, sz);
+    kin::fk(t_j1, t_j2, t_j3, tx, ty, tz);
+
+    const double dist  = std::sqrt((tx-sx)*(tx-sx) +
+                                   (ty-sy)*(ty-sy) +
+                                   (tz-sz)*(tz-sz));
+    const double dur   = std::max(dist / speed_mms, 0.2);
+    const int    steps = static_cast<int>(
+                           std::clamp(dist / 25.0, 4.0, 12.0));
+    const int    dwell = static_cast<int>((dur / steps) * 1e6);
+
+    // Joint speed: scale with largest joint delta so servos track the steps
+    const double max_j_delta = std::max({std::abs(t_j1-s_j1),
+                                         std::abs(t_j2-s_j2),
+                                         std::abs(t_j3-s_j3)});
+    const long SPD = static_cast<long>(std::clamp(max_j_delta * 80.0, 200.0, 2000.0));
+
+    for (int i = 1; i <= steps; ++i)
+    {
+      const double u = static_cast<double>(i) / steps;
+      const double t = 0.5 * (1.0 - std::cos(M_PI * u));
+
+      const double cmd_j1 = s_j1 + t*(t_j1-s_j1);
+      const double cmd_j2 = s_j2 + t*(t_j2-s_j2);
+      const double raw_j3 = s_j3 + t*(t_j3-s_j3);
+      // Safety clamp — enforce linkage constraints at every step
+      const double cmd_j3 = std::max(raw_j3,
+                              swiftpro::kinematics::j3_safe_min(cmd_j2));
+      if (cmd_j3 != raw_j3) {
+        RCLCPP_WARN_ONCE(get_logger(),
+          "execute_segment: J3 clamped %.1f→%.1f at J2=%.1f",
+          raw_j3, cmd_j3, cmd_j2);
       }
-      std::this_thread::sleep_for(poll_step);
+
+      swift_->set_servo_angle(0, static_cast<float>(cmd_j1), SPD, false);
+      swift_->set_servo_angle(1, static_cast<float>(cmd_j2), SPD, false);
+      swift_->set_servo_angle(2, static_cast<float>(cmd_j3), SPD, false);
+
+      std::this_thread::sleep_for(std::chrono::microseconds(dwell));
     }
   }
 
-  response->success = ok;
-  RCLCPP_INFO(get_logger(),
-              "set_servo_angles: complete success=%s", ok ? "true" : "false");
-}
-
-  void handle_reset(
-    const std::shared_ptr<swiftpro_resources::srv::Reset::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::Reset::Response> response)
+  // ---------------------------------------------------------------------------
+  // Service handler — smooth_move
+  //
+  // Moves the arm from current position to target via an automatic arc:
+  //
+  //   current → via → target
+  //
+  // The via point is the XY midpoint of current and target, lifted in Z:
+  //   via_x = (cur_x + tgt_x) / 2
+  //   via_y = (cur_y + tgt_y) / 2
+  //   via_z = max(cur_z, tgt_z) + lift   (default lift = 50mm)
+  //
+  // Each leg (current→via, via→target) is executed as a direct interpolated
+  // move using sine ease-in/ease-out in joint space. Step count scales with
+  // leg distance so short legs are fast and long legs are smooth.
+  //
+  // This produces a natural pick-and-place arc without the noise of the
+  // firmware's continuous servo correction trajectory planner.
+  // ---------------------------------------------------------------------------
+  void handle_smooth_move(
+    const std::shared_ptr<swiftpro_resources::srv::SmoothMove::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SmoothMove::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success = false;
+    namespace kin = swiftpro::kinematics;
+
+    if (!swift_ || !swift_->connected) {
+      res->success = false;
+      res->message = "Arm not connected";
       return;
     }
 
-    const float x = (request->x > 0.0f)  ? request->x : 200.0f;
-    const float y = (request->y != 0.0f) ? request->y : 0.0f;
-    const float z = (request->z > 0.0f)  ? request->z : 150.0f;
+    const double speed = (req->speed > 0.0) ? req->speed : 150.0;
 
-    swift_->reset(static_cast<long>(request->speed), 10.0f, x, y, z);
+    // ── Current joint angles ─────────────────────────────────────────────────
+    const auto angles = swift_->get_servo_angle();
+    if (angles.size() < 3) {
+      res->success = false;
+      res->message = "Failed to read current joint angles";
+      return;
+    }
+    const double s_j1 = static_cast<double>(angles[0]);
+    const double s_j2 = static_cast<double>(angles[1]);
+    const double s_j3 = static_cast<double>(angles[2]);
 
-    response->success = true;
+    // ── IK for target ────────────────────────────────────────────────────────
+    double t_j1, t_j2, t_j3;
+    std::string msg;
+    if (!kin::ik(req->x, req->y, req->z, t_j1, t_j2, t_j3, msg)) {
+      res->success = false;
+      res->message = "Target IK failed: " + msg;
+      RCLCPP_WARN(get_logger(), "smooth_move target IK: %s", msg.c_str());
+      return;
+    }
+
+    // ── Safe-corridor waypoint planner ───────────────────────────────────────
+    //
+    // Walks J2 from start to target in PLAN_STEPS equal increments.
+    // At each step, J3 is the linear interpolation of start→target J3,
+    // clamped up to j3_safe_min(j2) if needed.
+    // J1 is linearly interpolated throughout.
+    //
+    // This mirrors the manual stepped approach that was physically verified:
+    //   reset(J2=90,J3=0) → (60,10) → (40,20) → (30,26) → (21,32) ✓
+    //
+    // Waypoints where the clamped J3 equals the linear J3 are collapsed —
+    // only waypoints where the clamp actually changes the path are kept,
+    // plus the final target.
+
+    constexpr int PLAN_STEPS = 20;
+
+    struct Waypoint { double j1, j2, j3; };
+    std::vector<Waypoint> waypoints;
+
+    double prev_j1 = s_j1, prev_j2 = s_j2, prev_j3 = s_j3;
+
+    for (int i = 1; i <= PLAN_STEPS; ++i) {
+      const double t   = static_cast<double>(i) / PLAN_STEPS;
+      const double j1  = s_j1 + t * (t_j1 - s_j1);
+      const double j2  = s_j2 + t * (t_j2 - s_j2);
+      const double j3l = s_j3 + t * (t_j3 - s_j3);          // linear J3
+      const double j3  = std::max(j3l, kin::j3_safe_min(j2)); // clamped J3
+
+      // Only emit waypoint if position changed meaningfully
+      const double dj = std::abs(j2 - prev_j2) + std::abs(j3 - prev_j3);
+      if (dj > 0.5 || i == PLAN_STEPS) {
+        waypoints.push_back({j1, j2, j3});
+        prev_j1 = j1; prev_j2 = j2; prev_j3 = j3;
+      }
+    }
+
+    RCLCPP_INFO(get_logger(),
+                "smooth_move: (%.1f,%.1f,%.1f)→(%.1f,%.1f,%.1f) via %zu waypoints",
+                s_j1, s_j2, s_j3, t_j1, t_j2, t_j3, waypoints.size());
+
+    // ── Execute waypoint sequence ────────────────────────────────────────────
+    double cur_j1 = s_j1, cur_j2 = s_j2, cur_j3 = s_j3;
+    for (const auto& wp : waypoints) {
+      execute_segment(cur_j1, cur_j2, cur_j3, wp.j1, wp.j2, wp.j3, speed);
+      cur_j1 = wp.j1; cur_j2 = wp.j2; cur_j3 = wp.j3;
+    }
+
+    // ── Optional wait for settle ─────────────────────────────────────────────
+    if (req->wait) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      constexpr auto timeout   = std::chrono::seconds(10);
+      constexpr auto poll_step = std::chrono::milliseconds(50);
+      const auto     start     = std::chrono::steady_clock::now();
+      while (swift_->get_is_moving() == 1) {
+        if (std::chrono::steady_clock::now() - start > timeout) {
+          RCLCPP_WARN(get_logger(), "smooth_move: wait timeout");
+          break;
+        }
+        std::this_thread::sleep_for(poll_step);
+      }
+    }
+
+    res->success = true;
+    res->message = "OK";
+  }
+
+  void handle_reset(
+    const std::shared_ptr<swiftpro_resources::srv::Reset::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::Reset::Response> res)
+  {
+    if (!swift_ || !swift_->connected) { res->success = false; return; }
+    const float x = (req->x > 0.0f)  ? req->x : 200.0f;
+    const float y = (req->y != 0.0f) ? req->y :   0.0f;
+    const float z = (req->z > 0.0f)  ? req->z : 150.0f;
+    swift_->reset(static_cast<long>(req->speed), 10.0f, x, y, z);
+    res->success = true;
     RCLCPP_INFO(get_logger(),
                 "reset: complete — x=%.1f y=%.1f z=%.1f", x, y, z);
   }
@@ -795,60 +887,42 @@ if (request->j3 >= 0.0f)
   // ---------------------------------------------------------------------------
 
   void handle_set_pump(
-    const std::shared_ptr<swiftpro_resources::srv::SetPump::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetPump::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetPump::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetPump::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_pump(request->on);
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = swift_->set_pump(req->on);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(), "set_pump: %s result=%d",
-                request->on ? "ON" : "OFF", result);
+                req->on ? "ON" : "OFF", r);
   }
 
   void handle_set_gripper(
-    const std::shared_ptr<swiftpro_resources::srv::SetGripper::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetGripper::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetGripper::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetGripper::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_gripper(request->catch_object);
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = swift_->set_gripper(req->catch_object);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(), "set_gripper: %s result=%d",
-                request->catch_object ? "CATCH" : "RELEASE", result);
+                req->catch_object ? "CATCH" : "RELEASE", r);
   }
 
   void handle_set_buzzer(
-    const std::shared_ptr<swiftpro_resources::srv::SetBuzzer::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetBuzzer::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetBuzzer::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetBuzzer::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_buzzer(request->frequency, request->duration);
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = swift_->set_buzzer(req->frequency, req->duration);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(), "set_buzzer: freq=%d dur=%.1f result=%d",
-                request->frequency, request->duration, result);
+                req->frequency, req->duration, r);
   }
 
   // ---------------------------------------------------------------------------
@@ -856,41 +930,30 @@ if (request->j3 >= 0.0f)
   // ---------------------------------------------------------------------------
 
   void handle_set_servo_attach(
-    const std::shared_ptr<swiftpro_resources::srv::SetServoAttach::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetServoAttach::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetServoAttach::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetServoAttach::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result = request->attach
-      ? swift_->set_servo_attach(request->servo_id)
-      : swift_->set_servo_detach(request->servo_id);
-
-    response->success    = (result == 0);
-    response->error_code = result;
-
+    const int r = req->attach
+      ? swift_->set_servo_attach(req->servo_id)
+      : swift_->set_servo_detach(req->servo_id);
+    res->success = (r == 0); res->error_code = r;
     RCLCPP_INFO(get_logger(), "set_servo_attach: servo=%d attach=%s result=%d",
-                request->servo_id, request->attach ? "true" : "false", result);
+                req->servo_id, req->attach ? "true" : "false", r);
   }
 
   void handle_get_servo_attach(
-    const std::shared_ptr<swiftpro_resources::srv::GetServoAttach::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::GetServoAttach::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::GetServoAttach::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::GetServoAttach::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->attached = false;
-      response->success  = false;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->attached = false; res->success = false; return;
     }
-
-    const int result      = swift_->get_servo_attach(request->servo_id);
-    response->success     = (result >= 0);
-    response->attached    = (result == 0);
+    const int r   = swift_->get_servo_attach(req->servo_id);
+    res->success  = (r >= 0);
+    res->attached = (r == 0);
   }
 
   // ---------------------------------------------------------------------------
@@ -898,41 +961,27 @@ if (request->j3 >= 0.0f)
   // ---------------------------------------------------------------------------
 
   void handle_set_mode(
-    const std::shared_ptr<swiftpro_resources::srv::SetMode::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetMode::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetMode::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetMode::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_mode(request->mode);
-    response->success    = (result == 0);
-    response->error_code = result;
-
-    RCLCPP_INFO(get_logger(), "set_mode: mode=%d result=%d",
-                request->mode, result);
+    const int r = swift_->set_mode(req->mode);
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "set_mode: mode=%d result=%d", req->mode, r);
   }
 
   void handle_set_acceleration(
-    const std::shared_ptr<swiftpro_resources::srv::SetAcceleration::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetAcceleration::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetAcceleration::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetAcceleration::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_acceleration(request->acc);
-    response->success    = (result == 0);
-    response->error_code = result;
-
-    RCLCPP_INFO(get_logger(), "set_acceleration: acc=%.2f result=%d",
-                request->acc, result);
+    const int r = swift_->set_acceleration(req->acc);
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "set_acceleration: acc=%.2f result=%d", req->acc, r);
   }
 
   // ---------------------------------------------------------------------------
@@ -940,88 +989,66 @@ if (request->j3 >= 0.0f)
   // ---------------------------------------------------------------------------
 
   void handle_set_digital_output(
-    const std::shared_ptr<swiftpro_resources::srv::SetDigitalOutput::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetDigitalOutput::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetDigitalOutput::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetDigitalOutput::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_digital_output(request->pin, request->value);
-    response->success    = (result == 0);
-    response->error_code = result;
+    const int r = swift_->set_digital_output(req->pin, req->value);
+    res->success = (r == 0); res->error_code = r;
   }
 
   void handle_set_digital_direction(
-    const std::shared_ptr<swiftpro_resources::srv::SetDigitalDirection::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::SetDigitalDirection::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::SetDigitalDirection::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SetDigitalDirection::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->success    = false;
-      response->error_code = -1;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
     }
-
-    const int result     = swift_->set_digital_direction(request->pin, request->value);
-    response->success    = (result == 0);
-    response->error_code = result;
+    const int r = swift_->set_digital_direction(req->pin, req->value);
+    res->success = (r == 0); res->error_code = r;
   }
 
   void handle_get_digital(
-    const std::shared_ptr<swiftpro_resources::srv::GetDigital::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::GetDigital::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::GetDigital::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::GetDigital::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->value   = -1;
-      response->success = false;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->value = -1; res->success = false; return;
     }
-
-    const int result  = swift_->get_digital(request->pin);
-    response->value   = result;
-    response->success = (result >= 0);
+    const int r = swift_->get_digital(req->pin);
+    res->value   = r;
+    res->success = (r >= 0);
   }
 
   void handle_get_analog(
-    const std::shared_ptr<swiftpro_resources::srv::GetAnalog::Request>  request,
-          std::shared_ptr<swiftpro_resources::srv::GetAnalog::Response> response)
+    const std::shared_ptr<swiftpro_resources::srv::GetAnalog::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::GetAnalog::Response> res)
   {
-    if (!swift_ || !swift_->connected)
-    {
-      response->value   = -1;
-      response->success = false;
-      return;
+    if (!swift_ || !swift_->connected) {
+      res->value = -1; res->success = false; return;
     }
-
-    const int result  = swift_->get_analog(request->pin);
-    response->value   = result;
-    response->success = (result >= 0);
+    const int r = swift_->get_analog(req->pin);
+    res->value   = r;
+    res->success = (r >= 0);
   }
 
   // ---------------------------------------------------------------------------
   // Member variables
   // ---------------------------------------------------------------------------
 
-  // uarm driver
   std::unique_ptr<uarm::Swift> swift_;
   std::string                  port_;
   int                          baudrate_;
   double                       position_report_interval_;
   double                       move_tolerance_mm_;
 
-  // Position state — written from uarm callback thread, read from timer/action threads
   std::mutex         position_mutex_;
   std::vector<float> current_position_;
 
-  // Static trampoline target — one instance only (uarm API limitation)
   static SwiftProHardware* instance_;
 
-  // Publishers
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr  joint_state_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr     position_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr     polar_pub_;
@@ -1032,12 +1059,10 @@ if (request->j3 >= 0.0f)
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr           limit_switch_pub_;
   rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr           mode_pub_;
 
-  // Action server
   rclcpp_action::Server<MoveArm>::SharedPtr move_arm_server_;
   std::atomic<bool>                         goal_active_{false};
   std::thread                               execute_thread_;
 
-  // Services
   rclcpp::Service<swiftpro_resources::srv::SetPump>::SharedPtr             set_pump_srv_;
   rclcpp::Service<swiftpro_resources::srv::SetGripper>::SharedPtr          set_gripper_srv_;
   rclcpp::Service<swiftpro_resources::srv::Reset>::SharedPtr               reset_srv_;
@@ -1054,8 +1079,8 @@ if (request->j3 >= 0.0f)
   rclcpp::Service<swiftpro_resources::srv::GetDigital>::SharedPtr          get_digital_srv_;
   rclcpp::Service<swiftpro_resources::srv::GetAnalog>::SharedPtr           get_analog_srv_;
   rclcpp::Service<swiftpro_resources::srv::GetServoAttach>::SharedPtr      get_servo_attach_srv_;
+  rclcpp::Service<swiftpro_resources::srv::SmoothMove>::SharedPtr          smooth_move_srv_;
 
-  // Timers
   rclcpp::TimerBase::SharedPtr publish_timer_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
 };
