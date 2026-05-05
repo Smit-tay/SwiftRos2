@@ -311,6 +311,63 @@ public:
     int set_servo_angle(int servo_id, float angle, long speed = default_speed,
         bool wait = false, float timeout = default_timeout_10, void(*callback)(int) = NULL);
 
+   /*
+    * Move directly by joint angles (no inverse kinematics)
+    * @param base: base motor angle (degrees), 0~180
+    * @param left: left motor angle (degrees), 0~180
+    * @param right: right motor angle (degrees), 0~180
+    * @param speed: (mm/min) speed of move
+    * @param wait: true/false, default is false
+    * @param timeout: timeout, default is 10s
+    * @param callback: callback, default is None, only available if wait is true
+    * return:
+        0: ok
+        -1: not connect
+        -2: timeout
+        -3: serial exception
+        -4: command not exist
+        -5: params error
+        -6: address over
+        -7: command buffer full
+        -8: power is not connect
+        -9: operatation failed
+        -10: servo is detach, can not execute the cmd
+    */
+    int set_joint_angles(float base, float left, float right, long speed = default_speed,
+        bool wait = false, float timeout = default_timeout_10, void(*callback)(int) = NULL);
+
+    /*
+    * Pause arm motion (feed hold)
+    * Sends S1000 V0. Motion can be resumed with resume_motion().
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int pause_motion(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
+    * Resume arm motion after pause_motion()
+    * Sends S1000 V1.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int resume_motion(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
+    * Hard reset of the motion control subsystem
+    * Sends S1100. Equivalent to mc_reset() in the firmware. Aborts any
+    * in-flight motion and clears the planner buffer. Distinct from reset(),
+    * which is a homing move sequence.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int motion_reset(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
     /*
     * Set the wrist angle (SERVO HAND)
     * @param angle: (degree), 0 ~ 180

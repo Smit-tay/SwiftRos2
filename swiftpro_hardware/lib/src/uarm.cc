@@ -828,6 +828,33 @@ std::vector<float> Swift::get_servo_angle(bool wait, float timeout, void(*callba
     return _handle_get_float_vector(cmd, wait, timeout, callback);
 }
 
+int Swift::set_joint_angles(float base, float left, float right, long speed, bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "G2206 B" + std::to_string(base)
+        + " L" + std::to_string(left)
+        + " R" + std::to_string(right)
+        + " F" + std::to_string(speed);
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::pause_motion(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "S1000 V0";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::resume_motion(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "S1000 V1";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::motion_reset(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "S1100";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
 float Swift::get_joint_angle(int joint_id, bool wait, float timeout)
 {
     std::string cmd = "P2206 N" + std::to_string(joint_id);
