@@ -133,6 +133,12 @@ static void recv_thread_func(void *arg)
                                     }
                                 }
                             }
+                            else if (tmpList[0] == "@9" && tmpList.size() >= 2) {
+                                // motion complete event
+                                if (swift->motion_complete_callback != NULL) {
+                                    swift->timer.AsyncWait(0, swift->motion_complete_callback);
+                                }
+                            }
                         }
 
                         /*
@@ -181,6 +187,8 @@ Swift::Swift(const string &_port, uint32_t _baudrate, Timeout timeout, int _cmd_
     }
     pos_report_callback = NULL;
     limit_switch_callback = NULL;
+    motion_complete_callback = NULL;
+    
     //result = { NULL };
     for (int i = 0; i < MAX_CNT; i++) {
         result[i] = "";
@@ -430,6 +438,21 @@ void Swift::release_limit_switch_callback()
 {
     limit_switch_callback = NULL;
 }
+
+bool Swift::register_motion_complete_callback(void(*callback)(void))
+{
+    if (callback != NULL) {
+        motion_complete_callback = callback;
+        return true;
+    }
+    return false;
+}
+
+void Swift::release_motion_complete_callback()
+{
+    motion_complete_callback = NULL;
+}
+
 
 inline int Swift::_handle_set_int(std::string cmd, bool wait, float timeout, void(*callback)(int)) {
     int value = -1;
@@ -688,6 +711,12 @@ inline std::string Swift::_handle_get_string(std::string cmd, bool wait, float t
 int Swift::set_report_position(float interval, bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "M2120 V" + std::to_string(interval);
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::set_motion_report(bool on, bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2122 V" + std::to_string(on ? 1 : 0);
     return _handle_set_int(cmd, wait, timeout, callback);
 }
 

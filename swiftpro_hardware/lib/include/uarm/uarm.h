@@ -61,6 +61,7 @@ public:
     void(*power_callback)(bool);
     void(*pos_report_callback)(std::vector<float>);
     void(*limit_switch_callback)(bool);
+    void(*motion_complete_callback)(void);
     std::string result[MAX_CNT];
     //void(*callbacks[MAX_CNT])(std::string);
     std::function<void(std::string)> callbacks[MAX_CNT];
@@ -149,6 +150,21 @@ public:
     */
     void release_limit_switch_callback();
 
+    /*!
+    * Register motion-complete event callback
+    * Called when an @9 V0 event is received from the firmware. Requires
+    * set_motion_report(true) to be called first to enable the firmware
+    * emitter.
+    * @param callback: a function pointer
+    * return: true/false
+    */
+    bool register_motion_complete_callback(void(*callback)(void));
+
+    /*!
+    * Release motion-complete event callback
+    */
+    void release_motion_complete_callback();
+
     /*
     * Report position in (interval) seconds
     * @param interval: seconds, disable report if interval is 0
@@ -170,6 +186,19 @@ public:
     */
     int set_report_position(float interval, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
+    /*
+    * Enable or disable motion-complete event reports (@9 V0)
+    * Sends M2122 V1/V0. When enabled, the firmware emits an @9 V0 event
+    * when motion finishes (sys.state returns to STATE_IDLE after a move).
+    * Pair with register_motion_complete_callback to consume the events.
+    * @param on: true to enable, false to disable
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int set_motion_report(bool on, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+    
     /*
     * Attach the servo with the servo_id
     * @param servo_id: -1 ~ 3, -1 represents all servo
