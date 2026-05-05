@@ -504,6 +504,57 @@ public:
     */
     std::vector<float> get_servo_angle(bool wait = true, float timeout = default_timeout_2, void(*callback)(std::vector<float>) = NULL);
 
+/*
+    * Get the angle of a single joint
+    * @param joint_id: 0=base, 1=left, 2=right, 3=end-effector (wrist)
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: angle in degrees, or -1 on failure
+    */
+    float get_joint_angle(int joint_id, bool wait = true, float timeout = default_timeout_2);
+
+    /*
+    * Convert Cartesian coordinates to joint angles (no movement)
+    * @param x: (mm) location X
+    * @param y: (mm) location Y
+    * @param z: (mm) location Z
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: std::vector<float> object, like [base, left, right] or [] on failure
+    */
+    std::vector<float> coord_to_angles(float x, float y, float z,
+        bool wait = true, float timeout = default_timeout_2, void(*callback)(std::vector<float>) = NULL);
+
+    /*
+    * Convert joint angles to Cartesian coordinates (no movement)
+    * @param base: base motor angle (degrees)
+    * @param left: left motor angle (degrees)
+    * @param right: right motor angle (degrees)
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: std::vector<float> object, like [x, y, z] or [] on failure
+    */
+    std::vector<float> angles_to_coord(float base, float left, float right,
+        bool wait = true, float timeout = default_timeout_2, void(*callback)(std::vector<float>) = NULL);
+
+    /*
+    * Check whether a target position is reachable
+    * @param x: (mm) X, or (mm) stretch if polar=true
+    * @param y: (mm) Y, or (degrees) rotation if polar=true
+    * @param z: (mm) Z, or (mm) height if polar=true
+    * @param polar: false=Cartesian, true=polar coordinates
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 1 reachable, 0 unreachable, negative on error
+    */
+    int is_reachable(float x, float y, float z, bool polar = false,
+        bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+        
+
     /*
     * Get device info
     * @param timeout: timeout, default is 10s

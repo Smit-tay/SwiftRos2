@@ -828,6 +828,34 @@ std::vector<float> Swift::get_servo_angle(bool wait, float timeout, void(*callba
     return _handle_get_float_vector(cmd, wait, timeout, callback);
 }
 
+float Swift::get_joint_angle(int joint_id, bool wait, float timeout)
+{
+    std::string cmd = "P2206 N" + std::to_string(joint_id);
+    std::vector<float> result = _handle_get_float_vector(cmd, wait, timeout, NULL);
+    if (result.size() >= 1) {
+        return result[0];
+    }
+    return -1.0f;
+}
+
+std::vector<float> Swift::coord_to_angles(float x, float y, float z, bool wait, float timeout, void(*callback)(std::vector<float>))
+{
+    std::string cmd = "M2220 X" + std::to_string(x) + " Y" + std::to_string(y) + " Z" + std::to_string(z);
+    return _handle_get_float_vector(cmd, wait, timeout, callback);
+}
+
+std::vector<float> Swift::angles_to_coord(float base, float left, float right, bool wait, float timeout, void(*callback)(std::vector<float>))
+{
+    std::string cmd = "M2221 B" + std::to_string(base) + " L" + std::to_string(left) + " R" + std::to_string(right);
+    return _handle_get_float_vector(cmd, wait, timeout, callback);
+}
+
+int Swift::is_reachable(float x, float y, float z, bool polar, bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2222 X" + std::to_string(x) + " Y" + std::to_string(y) + " Z" + std::to_string(z) + " P" + std::to_string(polar ? 1 : 0);
+    return _handle_get_int(cmd, wait, timeout, callback);
+}
+
 int Swift::get_mode(bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "P2400";
