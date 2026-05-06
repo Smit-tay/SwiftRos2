@@ -187,6 +187,16 @@ public:
     int set_report_position(float interval, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
     /*
+    * Stop periodic position reports started by set_report_position()
+    * Sends M2121.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int stop_report_position(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
     * Enable or disable motion-complete event reports (@9 V0)
     * Sends M2122 V1/V0. When enabled, the firmware emits an @9 V0 event
     * when motion finishes (sys.state returns to STATE_IDLE after a move).

@@ -714,6 +714,12 @@ int Swift::set_report_position(float interval, bool wait, float timeout, void(*c
     return _handle_set_int(cmd, wait, timeout, callback);
 }
 
+int Swift::stop_report_position(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2121";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
 int Swift::set_motion_report(bool on, bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "M2122 V" + std::to_string(on ? 1 : 0);
