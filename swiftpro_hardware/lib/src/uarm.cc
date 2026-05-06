@@ -1078,3 +1078,42 @@ void Swift::flush_cmd()
     cmd_cond.wait(locker, [this] {return cmd_pend_count == 0; });
     locker.unlock();
 }
+
+int Swift::calibrate_at_point_b(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2401";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::calibrate_full_angle_sweep(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2500";
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::calibrate_full(float timeout)
+{
+    // Phase 1: full angle sweep (autonomous, several minutes)
+    int rc = calibrate_full_angle_sweep(true, timeout * 0.83f, NULL);
+    if (rc != 0) {
+        return rc;
+    }
+
+    // Detach motors so user can position arm at Point B by hand
+    rc = set_servo_detach(-1, true, default_timeout_2, NULL);
+    if (rc != 0) {
+        return rc;
+    }
+
+    // 30 seconds for manual positioning at Point B
+    sleep_milliseconds(30000);
+
+    // Phase 2: capture Point B reference
+    rc = calibrate_at_point_b(true, default_timeout_2, NULL);
+    if (rc != 0) {
+        return rc;
+    }
+
+    // Re-attach motors
+    return set_servo_attach(-1, true, default_timeout_2, NULL);
+}

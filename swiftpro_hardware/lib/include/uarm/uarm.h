@@ -818,6 +818,107 @@ public:
     */
     int get_encoder_status(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
+    // ====================================================================
+    // CALIBRATION COMMANDS
+    //
+    // The functions below modify persistent EEPROM-stored calibration
+    // state. They are infrequently used and require specific physical
+    // procedures (e.g. positioning the arm on a calibration sheet).
+    // See individual function documentation for procedures.
+    //
+    // The remaining firmware calibration commands (M2410, M2411, M2412,
+    // M2413 - end-effector offset setters) are deliberately NOT exposed
+    // here pending a more considered design for per-mode offsets.
+    // ====================================================================
+
+    /*
+    * Capture the current arm pose as the calibration reference (Point B)
+    * Sends M2401. The firmware reads current encoder counts and writes
+    * them as the reference values for absolute positioning thereafter.
+    *
+    * PROCEDURE:
+    *   1. Place arm base on the official UFactory calibration sheet,
+    *      aligned with printed outline
+    *   2. Call set_servo_detach(-1) to release motors
+    *   3. Manually move the bare end-effector mount (no toolhead) to
+    *      Point B on the calibration sheet
+    *   4. Call calibrate_at_point_b()
+    *   5. Call set_servo_attach(-1) to re-engage motors
+    *   6. Verify with get_position() -- should match Point B's
+    *      documented coordinates
+    *
+    * Calibration is persistent (EEPROM) and survives power cycles.
+    * Two calibration sheets exist for different SwiftPro hardware
+    * revisions (UP12/UARM05 vs UP13). Match yours by serial number.
+    *
+    * NOTE: Rarely needed. Only call when:
+    *   - Recalibrating after physical disassembly
+    *   - Recovering after EEPROM corruption
+    *   - After calibrate_full_angle_sweep()
+    *
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int calibrate_at_point_b(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
+    * Run the firmware's automated angle calibration routine
+    * Sends M2500. The arm autonomously sweeps each joint through its
+    * full range of motion, recording encoder values at calibrated
+    * positions. Builds an encoder-to-angle lookup table for accurate
+    * non-linear angle calculation. Writes results to EEPROM.
+    *
+    * IMPORTANT:
+    *   - Workspace must be COMPLETELY CLEAR before calling
+    *   - Arm WILL move autonomously through its full range
+    *   - Procedure takes several minutes
+    *   - Failing partway through leaves partial calibration in EEPROM
+    *
+    * This establishes the SHAPE of the encoder-to-angle curve. After
+    * M2500 completes, calibrate_at_point_b() must be called to
+    * establish the absolute origin. See calibrate_full() for the
+    * combined sequence.
+    *
+    * Default timeout is 5 minutes (300s) to accommodate the full sweep.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 300s (5 minutes)
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int calibrate_full_angle_sweep(bool wait = true, float timeout = 300.0f, void(*callback)(int) = NULL);
+
+    /*
+    * Run the complete two-phase calibration sequence
+    *
+    * Performs M2500 (full angle sweep) followed by M2401 (Point B
+    * reference) in a single call. Both phases are required for
+    * correct absolute positioning.
+    *
+    * PROCEDURE BEFORE CALLING:
+    *   1. Place arm base on the official UFactory calibration sheet
+    *   2. Ensure workspace is COMPLETELY CLEAR -- arm will sweep
+    *      through full range during phase 1
+    *   3. After phase 1 (M2500) completes, this function will pause
+    *      30 seconds. Position the bare end-effector mount at Point B
+    *      on the calibration sheet during this pause. The arm will
+    *      have its motors detached and can be moved by hand.
+    *   4. Phase 2 (M2401) captures the Point B reference
+    *
+    * Returns 0 on success, or the error code from whichever phase
+    * failed.
+    *
+    * NOTE: This is a complex orchestrated operation. Most users will
+    * want to call the two phases separately, with manual arm
+    * positioning between them, rather than using this convenience
+    * wrapper.
+    *
+    * @param timeout: total timeout, default is 360s (6 minutes)
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int calibrate_full(float timeout = 360.0f);
+
     /*
     * Wait until all command return or timeout
     */
