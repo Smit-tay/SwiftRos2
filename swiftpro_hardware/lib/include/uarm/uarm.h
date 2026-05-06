@@ -568,7 +568,7 @@ public:
     * @param wait: true/false, default is true
     * @param timeout: timeout, default is 2s
     * @param callback: callback, default is None, only available if wait is true
-    * return: std::vector<float> object, like [x, y, z, r] or []
+    * return: std::vector<float> object, like [x, y, z] or []
     */
     std::vector<float> get_position(bool wait = true, float timeout = default_timeout_2, void(*callback)(std::vector<float>) = NULL);
 
@@ -586,7 +586,7 @@ public:
     * @param wait: true/false, default is true
     * @param timeout: timeout, default is 2s
     * @param callback: callback, default is None, only available if wait is true
-    * return: std::vector<float> object, like [angle-0, angle-1, angle-2] or []
+    * return: std::vector<float> object, like [base, left, right] or []
     */
     std::vector<float> get_servo_angle(bool wait = true, float timeout = default_timeout_2, void(*callback)(std::vector<float>) = NULL);
 
