@@ -886,12 +886,22 @@ int Swift::motion_reset(bool wait, float timeout, void(*callback)(int))
 
 float Swift::get_joint_angle(int joint_id, bool wait, float timeout)
 {
-    std::string cmd = "P2206 N" + std::to_string(joint_id);
-    std::vector<float> result = _handle_get_float_vector(cmd, wait, timeout, NULL);
-    if (result.size() >= 1) {
-        return result[0];
-    }
-    return -1.0f;
+	std::string cmd = "P2206 N" + std::to_string(joint_id);
+	if (wait) {
+		std::string ret = send_cmd_sync(cmd, timeout);
+		std::vector<std::string> tmpList = split(ret, " ");
+		if (tmpList.size() >= 2 && tmpList[0] == "ok"
+			&& tmpList[1].length() >= 2) {
+			try {
+				return std::stof(tmpList[1].substr(1));
+			} catch (...) {
+				return -1.0f;
+			}
+		}
+		return -1.0f;
+	}
+	send_cmd_async(cmd, timeout, NULL);
+	return -1.0f;
 }
 
 std::vector<float> Swift::coord_to_angles(float x, float y, float z, bool wait, float timeout, void(*callback)(std::vector<float>))
