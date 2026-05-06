@@ -726,6 +726,12 @@ int Swift::set_motion_report(bool on, bool wait, float timeout, void(*callback)(
     return _handle_set_int(cmd, wait, timeout, callback);
 }
 
+int Swift::set_motor_position_check(bool on, bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2123 V" + std::to_string(on ? 1 : 0);
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
 int Swift::set_servo_attach(int servo_id, bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "";
@@ -818,6 +824,12 @@ int Swift::set_gripper(bool _catch, bool wait, float timeout, void(*callback)(in
     return _handle_set_int(cmd, wait, timeout, callback);
 }
 
+int Swift::set_laser(bool on, bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2233 V" + std::to_string(on ? 1 : 0);
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
 int Swift::set_digital_output(int pin, int value, bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "M2240 N" + std::to_string(pin) + " V" + std::to_string(value);
@@ -833,6 +845,12 @@ int Swift::set_digital_direction(int pin, int value, bool wait, float timeout, v
 int Swift::set_acceleration(float acc, bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "M204 A" + std::to_string(acc);
+    return _handle_set_int(cmd, wait, timeout, callback);
+}
+
+int Swift::reset_grbl_settings(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "M2215";
     return _handle_set_int(cmd, wait, timeout, callback);
 }
 
@@ -953,6 +971,11 @@ int Swift::get_pump_status(bool wait, float timeout, void(*callback)(int))
     std::string cmd = "P2231";
     return _handle_get_int(cmd, wait, timeout, callback);
 }
+int Swift::get_laser_status(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "P2235";
+    return _handle_get_int(cmd, wait, timeout, callback);
+}
 int Swift::get_power_status(bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "P2234";
@@ -975,6 +998,45 @@ int Swift::get_is_moving(bool wait, float timeout, void(*callback)(int))
 {
     std::string cmd = "M2200";
     return _handle_get_int(cmd, wait, timeout, callback);
+}
+
+int Swift::get_encoder_status(bool wait, float timeout, void(*callback)(int))
+{
+    std::string cmd = "P2244";
+    int value = -1;
+    if (wait) {
+        std::string ret = send_cmd_sync(cmd, timeout);
+        std::vector<std::string> tmpList = split(ret, " ");
+        // Both "ok V0" and "E26 V<bits>" carry V<n> at position 1
+        if (tmpList.size() >= 2 && tmpList[1].length() >= 2
+            && tmpList[1][0] == 'V') {
+            try {
+                value = std::stoi(tmpList[1].substr(1));
+            } catch (...) {
+                value = -1;
+            }
+        }
+        return value;
+    }
+    if (callback != NULL) {
+        std::function<void(std::string)> _callback = [callback](std::string result) {
+            std::vector<std::string> tmpList = split(result, " ");
+            int v = -1;
+            if (tmpList.size() >= 2 && tmpList[1].length() >= 2
+                && tmpList[1][0] == 'V') {
+                try {
+                    v = std::stoi(tmpList[1].substr(1));
+                } catch (...) {
+                    v = -1;
+                }
+            }
+            callback(v);
+        };
+        send_cmd_async(cmd, timeout, _callback);
+    } else {
+        send_cmd_async(cmd, timeout, NULL);
+    }
+    return value;
 }
 
 std::string* Swift::get_device_info(float timeout)

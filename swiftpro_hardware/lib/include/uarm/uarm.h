@@ -208,7 +208,20 @@ public:
     * return: 0 ok, negative on error (see set_position for codes)
     */
     int set_motion_report(bool on, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
-    
+
+    /*
+    * Enable or disable closed-loop motor position checking
+    * Sends M2123. When enabled, the firmware periodically compares
+    * commanded stepper position against encoder readings and may
+    * raise alarms on significant divergence.
+    * @param on: true to enable, false to disable
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int set_motor_position_check(bool on, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
     /*
     * Attach the servo with the servo_id
     * @param servo_id: -1 ~ 3, -1 represents all servo
@@ -499,6 +512,18 @@ public:
         bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
     /*
+    * Control the laser end-effector
+    * Sends M2233. Toggles the laser GPIO regardless of whether a laser
+    * end-effector is physically attached.
+    * @param on: true to power on, false to power off
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int set_laser(bool on, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
     * Set digital output value
     * @param pin: IO pin
     * @param value: 0: output low level, 1: output high level
@@ -562,6 +587,24 @@ public:
         -10: servo is detach, can not execute the cmd
     */
     int set_acceleration(float acc, bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
+    * Reset Grbl motion controller settings to firmware defaults
+    * Sends M2215. Restores Grbl-level configuration to compiled-in
+    * defaults. Does NOT affect joint calibration or end-effector
+    * offsets, which live in separate EEPROM regions.
+    *
+    * WARNING: On jss.5 firmware, this restores original Grbl defaults
+    * (junction deviation 0.01, acceleration ramp 100, look-ahead 18),
+    * NOT the jss.5-tuned values (0.05, 200, 24). After calling this
+    * the arm motion quality will degrade significantly. The cleanest
+    * recovery is to reflash V4.9.1-jss.5.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 ok, negative on error (see set_position for codes)
+    */
+    int reset_grbl_settings(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
     /*
     * Reset
@@ -719,6 +762,16 @@ public:
     int get_pump_status(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
     /*
+    * Get the laser GPIO state
+    * Sends P2235. Reports GPIO state, not whether laser is emitting.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: 0 off, 1 on, -1 failed
+    */
+    int get_laser_status(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
     * Get the digital value from specific pin
     * @param pin: specific pin
     * @param wait: true/false, default is true
@@ -746,6 +799,24 @@ public:
     * return: 0: not move, 1: moving, -1: failed
     */
     int get_is_moving(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
+
+    /*
+    * Get encoder communication health status across all three joints
+    * Sends P2244. Returns a bitfield indicating which AS5600 magnetic
+    * encoders failed I2C communication:
+    *   bit 0 (value 1) = base encoder failed
+    *   bit 1 (value 2) = right encoder failed
+    *   bit 2 (value 4) = left encoder failed
+    * 0 = all healthy, 7 = all failed.
+    *
+    * Encoder failure typically indicates a damaged FFC ribbon cable
+    * or a detached encoder magnet.
+    * @param wait: true/false, default is true
+    * @param timeout: timeout, default is 2s
+    * @param callback: callback, default is None, only available if wait is true
+    * return: bitfield 0-7 on success, -1 on serial/parse failure
+    */
+    int get_encoder_status(bool wait = true, float timeout = default_timeout_2, void(*callback)(int) = NULL);
 
     /*
     * Wait until all command return or timeout
