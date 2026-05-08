@@ -1,0 +1,8 @@
+# PauseMotion.srv
+# Copyright 2026 Jack Sidman Smith
+# Licensed under the MIT License.
+#
+# Pause arm motion (feed hold). Resume with ResumeMotion.
+---
+bool   success
+int32  error_code

@@ -13,11 +13,8 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   # Actions
   "messaging/action/MoveArm.action"
-  # Messages
-  "messaging/msg/MoveToPosition.msg"
   # Services — existing
   "messaging/srv/MoveTo.srv"
-  "messaging/srv/MoveToPosition.srv"
   "messaging/srv/Reset.srv"
   "messaging/srv/SetGripper.srv"
   "messaging/srv/SetPump.srv"
@@ -26,7 +23,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "messaging/srv/ComputeIK.srv"
   "messaging/srv/GetAnalog.srv"
   "messaging/srv/GetDigital.srv"
+  "messaging/srv/GetEncoderStatus.srv"
   "messaging/srv/GetServoAttach.srv"
+  "messaging/srv/MotionReset.srv"
+  "messaging/srv/PauseMotion.srv"
+  "messaging/srv/ResumeMotion.srv"
   "messaging/srv/SetAcceleration.srv"
   "messaging/srv/SetBuzzer.srv"
   "messaging/srv/SetDigitalDirection.srv"

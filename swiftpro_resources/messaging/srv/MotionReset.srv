@@ -1,0 +1,9 @@
+# MotionReset.srv
+# Copyright 2026 Jack Sidman Smith
+# Licensed under the MIT License.
+#
+# Hard reset of the motion control subsystem. Aborts in-flight motion
+# and clears the planner buffer. Use for emergency stop.
+---
+bool   success
+int32  error_code

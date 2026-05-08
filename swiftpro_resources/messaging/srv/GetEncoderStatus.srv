@@ -1,0 +1,12 @@
+# GetEncoderStatus.srv
+# Copyright 2026 Jack Sidman Smith
+# Licensed under the MIT License.
+#
+# Returns AS5600 encoder health as a bitfield.
+# bit 0 = base encoder failed
+# bit 1 = right encoder failed
+# bit 2 = left encoder failed
+# 0 = all healthy, 7 = all failed, -1 = query failed
+---
+int32  status
+bool   success

@@ -1,0 +1,8 @@
+# ResumeMotion.srv
+# Copyright 2026 Jack Sidman Smith
+# Licensed under the MIT License.
+#
+# Resume arm motion after PauseMotion.
+---
+bool   success
+int32  error_code

@@ -1,14 +1,15 @@
 // swiftpro_hardware.cpp
-// Copyright 2025 Jack Sidman Smith
+// Copyright 2026 Jack Sidman Smith
 // Licensed under the MIT License. See LICENSE in project root.
 //
 // Hardware interface node for the UArm Swift Pro robotic arm.
 //
 // Connects to the arm via USB serial and provides:
+//
 //   Publishers:
 //     /joint_states              sensor_msgs/JointState  (Joint1, Joint2, Joint3)
-//     /swiftpro/position         geometry_msgs/Point     (raw XYZ from arm firmware)
-//     /swiftpro/polar            geometry_msgs/Point     (stretch, rotation, height)
+//     /swiftpro/position         geometry_msgs/Point     (raw XYZ from firmware, mm)
+//     /swiftpro/polar            geometry_msgs/Point     (stretch mm, rotation deg, height mm)
 //     /swiftpro/pump_status      std_msgs/Int8           (0=stop, 1=working, 2=caught)
 //     /swiftpro/gripper_status   std_msgs/Int8           (0=stop, 1=working, 2=caught)
 //     /swiftpro/connected        std_msgs/Bool
@@ -20,42 +21,46 @@
 //     /swiftpro/move_arm         swiftpro_resources/action/MoveArm
 //       Goal:     x, y, z (mm), speed (mm/min)
 //       Feedback: current_x, current_y, current_z (mm) at 10 Hz while moving
-//       Result:   success, error_code, message — position verified within move_tolerance_mm
-//       Cancel:   flush pending commands, command current position (best-effort stop)
+//       Result:   success, error_code, message
+//       Cancel:   motion_reset() + best-effort stop
 //
 //   Services:
-//     /swiftpro/set_pump         swiftpro_resources/srv/SetPump
-//     /swiftpro/set_gripper      swiftpro_resources/srv/SetGripper
-//     /swiftpro/reset            swiftpro_resources/srv/Reset
-//     /swiftpro/set_wrist        swiftpro_resources/srv/SetWrist
-//     /swiftpro/set_servo_attach swiftpro_resources/srv/SetServoAttach
-//     /swiftpro/set_mode         swiftpro_resources/srv/SetMode
-//     /swiftpro/set_polar        swiftpro_resources/srv/SetPolar
-//     /swiftpro/set_servo_angle  swiftpro_resources/srv/SetServoAngle
-//     /swiftpro/set_buzzer       swiftpro_resources/srv/SetBuzzer
-//     /swiftpro/set_acceleration swiftpro_resources/srv/SetAcceleration
-//     /swiftpro/set_digital_output     swiftpro_resources/srv/SetDigitalOutput
-//     /swiftpro/set_digital_direction  swiftpro_resources/srv/SetDigitalDirection
-//     /swiftpro/get_digital      swiftpro_resources/srv/GetDigital
-//     /swiftpro/get_analog       swiftpro_resources/srv/GetAnalog
-//     /swiftpro/get_servo_attach swiftpro_resources/srv/GetServoAttach
-//     /swiftpro/smooth_move      swiftpro_resources/srv/SmoothMove
+//     /swiftpro/set_pump
+//     /swiftpro/set_gripper
+//     /swiftpro/reset
+//     /swiftpro/set_wrist
+//     /swiftpro/set_servo_attach
+//     /swiftpro/set_mode
+//     /swiftpro/set_polar
+//     /swiftpro/set_servo_angle
+//     /swiftpro/set_servo_angles
+//     /swiftpro/set_buzzer
+//     /swiftpro/set_acceleration
+//     /swiftpro/set_digital_output
+//     /swiftpro/set_digital_direction
+//     /swiftpro/get_digital
+//     /swiftpro/get_analog
+//     /swiftpro/get_servo_attach
+//     /swiftpro/get_encoder_status
+//     /swiftpro/smooth_move
+//     /swiftpro/pause_motion
+//     /swiftpro/resume_motion
+//     /swiftpro/motion_reset
 //
-// Joint names Joint1/Joint2/Joint3 match the URDF joint names in swiftpro.xacro exactly.
+// Joint names Joint1/Joint2/Joint3 match URDF joint names in swiftpro.xacro exactly.
 // robot_state_publisher computes Joint4-Joint8 via <mimic> tags.
-// The swiftpro_kinematics node computes end effector FK from these joints.
+// swiftpro_kinematics node computes end effector FK from these joints.
 
-// Standard library
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-// ROS2
 #include <geometry_msgs/msg/point.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -63,15 +68,17 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int8.hpp>
 
-// uarm
 #include "uarm/uarm.h"
 
-// Project messages
 #include "swiftpro_resources/action/move_arm.hpp"
 #include "swiftpro_resources/srv/get_analog.hpp"
 #include "swiftpro_resources/srv/get_digital.hpp"
+#include "swiftpro_resources/srv/get_encoder_status.hpp"
 #include "swiftpro_resources/srv/get_servo_attach.hpp"
+#include "swiftpro_resources/srv/motion_reset.hpp"
+#include "swiftpro_resources/srv/pause_motion.hpp"
 #include "swiftpro_resources/srv/reset.hpp"
+#include "swiftpro_resources/srv/resume_motion.hpp"
 #include "swiftpro_resources/srv/set_acceleration.hpp"
 #include "swiftpro_resources/srv/set_buzzer.hpp"
 #include "swiftpro_resources/srv/set_digital_direction.hpp"
@@ -86,22 +93,18 @@
 #include "swiftpro_resources/srv/set_wrist.hpp"
 #include "swiftpro_resources/srv/smooth_move.hpp"
 
-// Kinematics — FK/IK shared with swiftpro_kinematics node
 #include "swiftpro_kinematics/kinematics.hpp"
-
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
 
 static const std::vector<std::string> DRIVEN_JOINT_NAMES = {
-  "Joint1",
-  "Joint2",
-  "Joint3"
+  "Joint1", "Joint2", "Joint3"
 };
 
-static constexpr double DEG_TO_RAD  = M_PI / 180.0;
-// default_speed = 10000 defined in uarm/uarm.h
+static constexpr double DEG_TO_RAD        = M_PI / 180.0;
+static constexpr int    CONNECT_SETTLE_MS = 2000;   // DTR reset boot delay
 
 // -----------------------------------------------------------------------------
 
@@ -118,11 +121,11 @@ public:
     instance_ = this;
 
     // ── Parameters ──────────────────────────────────────────────────────────
-    declare_parameter<std::string>("port", "/dev/ttyACM0");
-    declare_parameter<int>("baudrate", 115200);
-    declare_parameter<double>("position_report_interval", 0.1);
-    declare_parameter<double>("joint_state_publish_rate", 10.0);
-    declare_parameter<double>("move_tolerance_mm", 15.0);
+    declare_parameter<std::string>("port",                    "/dev/ttyACM0");
+    declare_parameter<int>        ("baudrate",                115200);
+    declare_parameter<double>     ("position_report_interval", 0.1);
+    declare_parameter<double>     ("joint_state_publish_rate", 10.0);
+    declare_parameter<double>     ("move_tolerance_mm",        15.0);
 
     port_                     = get_parameter("port").as_string();
     baudrate_                 = get_parameter("baudrate").as_int();
@@ -143,8 +146,7 @@ public:
 
     // ── Action server ────────────────────────────────────────────────────────
     move_arm_server_ = rclcpp_action::create_server<MoveArm>(
-      this,
-      "swiftpro/move_arm",
+      this, "swiftpro/move_arm",
       std::bind(&SwiftProHardware::handle_goal,     this,
                 std::placeholders::_1, std::placeholders::_2),
       std::bind(&SwiftProHardware::handle_cancel,   this,
@@ -233,19 +235,37 @@ public:
       std::bind(&SwiftProHardware::handle_get_servo_attach, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    get_encoder_status_srv_ = create_service<swiftpro_resources::srv::GetEncoderStatus>(
+      "swiftpro/get_encoder_status",
+      std::bind(&SwiftProHardware::handle_get_encoder_status, this,
+                std::placeholders::_1, std::placeholders::_2));
+
     smooth_move_srv_ = create_service<swiftpro_resources::srv::SmoothMove>(
       "swiftpro/smooth_move",
       std::bind(&SwiftProHardware::handle_smooth_move, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    pause_motion_srv_ = create_service<swiftpro_resources::srv::PauseMotion>(
+      "swiftpro/pause_motion",
+      std::bind(&SwiftProHardware::handle_pause_motion, this,
+                std::placeholders::_1, std::placeholders::_2));
+
+    resume_motion_srv_ = create_service<swiftpro_resources::srv::ResumeMotion>(
+      "swiftpro/resume_motion",
+      std::bind(&SwiftProHardware::handle_resume_motion, this,
+                std::placeholders::_1, std::placeholders::_2));
+
+    motion_reset_srv_ = create_service<swiftpro_resources::srv::MotionReset>(
+      "swiftpro/motion_reset",
+      std::bind(&SwiftProHardware::handle_motion_reset, this,
+                std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(get_logger(),
-                "SwiftPro hardware node —   Jack Sidman Smith - built %s %s",
+                "SwiftPro hardware node — Jack Sidman Smith — built %s %s",
                 __DATE__, __TIME__);
 
-    // ── Connect to arm ───────────────────────────────────────────────────────
     connect();
 
-    // ── Timers ───────────────────────────────────────────────────────────────
     const auto publish_period =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / publish_rate));
@@ -289,17 +309,24 @@ private:
         return;
       }
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      // Allow firmware to complete boot after DTR/RTS reset
+      std::this_thread::sleep_for(std::chrono::milliseconds(CONNECT_SETTLE_MS));
 
       swift_->register_report_position_callback(
         SwiftProHardware::position_callback);
       swift_->register_limit_switch_callback(
         SwiftProHardware::limit_switch_callback);
+      swift_->register_motion_complete_callback(
+        SwiftProHardware::motion_complete_callback);
 
-      const int ret = swift_->set_report_position(
+      const int ret_pos = swift_->set_report_position(
         static_cast<float>(position_report_interval_), true, 5.0f);
       RCLCPP_DEBUG(get_logger(),
-                   "connect: set_report_position returned %d", ret);
+                   "connect: set_report_position returned %d", ret_pos);
+
+      const int ret_motion = swift_->set_motion_report(true, true, 5.0f);
+      RCLCPP_DEBUG(get_logger(),
+                   "connect: set_motion_report returned %d", ret_motion);
 
       std::string* info = swift_->get_device_info();
       if (info)
@@ -309,6 +336,18 @@ private:
         RCLCPP_INFO(get_logger(), "Firmware version: %s", info[2].c_str());
         RCLCPP_INFO(get_logger(), "API version     : %s", info[3].c_str());
         RCLCPP_INFO(get_logger(), "Device unique   : %s", info[4].c_str());
+      }
+
+      const int enc = swift_->get_encoder_status();
+      if (enc == 0)
+      {
+        RCLCPP_INFO(get_logger(), "connect: all encoders healthy");
+      }
+      else if (enc > 0)
+      {
+        RCLCPP_WARN(get_logger(),
+                    "connect: encoder fault bitfield=0x%x "
+                    "(bit0=base bit1=right bit2=left)", enc);
       }
 
       RCLCPP_INFO(get_logger(),
@@ -349,6 +388,11 @@ private:
     if (instance_) { instance_->on_limit_switch(state); }
   }
 
+  static void motion_complete_callback()
+  {
+    if (instance_) { instance_->on_motion_complete(); }
+  }
+
   void on_position_report(const std::vector<float>& position)
   {
     if (position.size() < 3) { return; }
@@ -361,6 +405,15 @@ private:
     std_msgs::msg::Bool msg;
     msg.data = state;
     limit_switch_pub_->publish(msg);
+  }
+
+  void on_motion_complete()
+  {
+    {
+      std::lock_guard<std::mutex> lock(motion_mutex_);
+      motion_done_ = true;
+    }
+    motion_cv_.notify_all();
   }
 
   // ---------------------------------------------------------------------------
@@ -461,8 +514,21 @@ private:
       return rclcpp_action::GoalResponse::REJECT;
     }
 
+    const int reachable = swift_->is_reachable(
+      static_cast<float>(goal->x),
+      static_cast<float>(goal->y),
+      static_cast<float>(goal->z));
+    if (reachable == 0)
+    {
+      RCLCPP_WARN(get_logger(),
+                  "move_arm: rejected — target (%.1f,%.1f,%.1f) unreachable",
+                  goal->x, goal->y, goal->z);
+      goal_active_.store(false);
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+
     RCLCPP_INFO(get_logger(),
-                "move_arm: goal received x=%.1f y=%.1f z=%.1f speed=%.0f",
+                "move_arm: goal accepted x=%.1f y=%.1f z=%.1f speed=%.0f",
                 goal->x, goal->y, goal->z, goal->speed);
 
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -488,30 +554,30 @@ private:
     auto       feedback = std::make_shared<MoveArm::Feedback>();
     auto       result   = std::make_shared<MoveArm::Result>();
 
+    // Reset motion-complete flag before issuing command
+    {
+      std::lock_guard<std::mutex> lock(motion_mutex_);
+      motion_done_ = false;
+    }
+
     swift_->set_position(
-      goal->x, goal->y, goal->z,
+      static_cast<float>(goal->x),
+      static_cast<float>(goal->y),
+      static_cast<float>(goal->z),
       static_cast<long>(goal->speed),
       false, false);
 
-    constexpr auto poll_interval = std::chrono::milliseconds(100);
-    constexpr int  max_polls     = 300;
+    // Wait for motion-complete event (firmware @9 V0 via set_motion_report)
+    // or cancellation, with a hard timeout.
+    constexpr auto timeout   = std::chrono::seconds(30);
+    constexpr auto poll_step = std::chrono::milliseconds(100);
+    const auto     deadline  = std::chrono::steady_clock::now() + timeout;
 
-    for (int i = 0; i < max_polls; ++i)
+    while (true)
     {
-      std::this_thread::sleep_for(poll_interval);
-
       if (goal_handle->is_canceling())
       {
-        swift_->flush_cmd();
-        {
-          std::lock_guard<std::mutex> lock(position_mutex_);
-          if (current_position_.size() >= 3)
-          {
-            swift_->set_position(
-              current_position_[0], current_position_[1], current_position_[2],
-              static_cast<long>(goal->speed), false, false);
-          }
-        }
+        swift_->motion_reset();
         result->success    = false;
         result->error_code = -3;
         result->message    = "Cancelled";
@@ -532,7 +598,19 @@ private:
         }
       }
 
-      if (swift_->get_is_moving() == 0) { break; }
+      {
+        std::unique_lock<std::mutex> lock(motion_mutex_);
+        if (motion_cv_.wait_for(lock, poll_step, [this] { return motion_done_; }))
+        {
+          break;  // motion-complete event received
+        }
+      }
+
+      if (std::chrono::steady_clock::now() >= deadline)
+      {
+        RCLCPP_WARN(get_logger(), "move_arm: timeout waiting for motion complete");
+        break;
+      }
     }
 
     float actual_x{0.0f}, actual_y{0.0f}, actual_z{0.0f};
@@ -546,9 +624,9 @@ private:
       }
     }
 
-    const float dx   = std::abs(actual_x - goal->x);
-    const float dy   = std::abs(actual_y - goal->y);
-    const float dz   = std::abs(actual_z - goal->z);
+    const float dx   = std::abs(actual_x - static_cast<float>(goal->x));
+    const float dy   = std::abs(actual_y - static_cast<float>(goal->y));
+    const float dz   = std::abs(actual_z - static_cast<float>(goal->z));
     const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
     const bool  ok   = (dist <= static_cast<float>(move_tolerance_mm_));
 
@@ -566,7 +644,6 @@ private:
           dist, move_tolerance_mm_, actual_x, actual_y, actual_z);
         result->message = buf;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
       goal_handle->succeed(result);
       RCLCPP_INFO(get_logger(),
                   "move_arm: %s dist=%.1fmm actual=(%.1f,%.1f,%.1f)",
@@ -577,8 +654,178 @@ private:
   }
 
   // ---------------------------------------------------------------------------
+  // execute_segment — interpolated joint-space move, one segment
+  //
+  // Steps scale with tip distance for consistent apparent speed.
+  // J3 is clamped at every step to enforce parallel-linkage constraints.
+  // Uses set_joint_angles() — single command per step, not three.
+  // ---------------------------------------------------------------------------
+  void execute_segment(double s_j1, double s_j2, double s_j3,
+                       double t_j1, double t_j2, double t_j3,
+                       double speed_mms)
+  {
+    namespace kin = swiftpro::kinematics;
+
+    double sx, sy, sz, tx, ty, tz;
+    kin::fk(s_j1, s_j2, s_j3, sx, sy, sz);
+    kin::fk(t_j1, t_j2, t_j3, tx, ty, tz);
+
+    const double dist  = std::sqrt((tx-sx)*(tx-sx) +
+                                   (ty-sy)*(ty-sy) +
+                                   (tz-sz)*(tz-sz));
+    const double dur   = std::max(dist / speed_mms, 0.2);
+    const int    steps = static_cast<int>(
+                           std::clamp(dist / 25.0, 4.0, 12.0));
+    const int    dwell = static_cast<int>((dur / steps) * 1e6);
+
+    const double max_j_delta = std::max({std::abs(t_j1-s_j1),
+                                         std::abs(t_j2-s_j2),
+                                         std::abs(t_j3-s_j3)});
+    const long SPD = static_cast<long>(
+      std::clamp(max_j_delta * 80.0, 200.0, 2000.0));
+
+    for (int i = 1; i <= steps; ++i)
+    {
+      const double u = static_cast<double>(i) / steps;
+      const double t = 0.5 * (1.0 - std::cos(M_PI * u));
+
+      const double cmd_j1 = s_j1 + t*(t_j1-s_j1);
+      const double cmd_j2 = s_j2 + t*(t_j2-s_j2);
+      const double raw_j3 = s_j3 + t*(t_j3-s_j3);
+      const double cmd_j3 = std::max(raw_j3,
+                              kin::j3_safe_min(cmd_j2));
+      if (cmd_j3 != raw_j3) {
+        RCLCPP_WARN_ONCE(get_logger(),
+          "execute_segment: J3 clamped %.1f→%.1f at J2=%.1f",
+          raw_j3, cmd_j3, cmd_j2);
+      }
+
+      swift_->set_joint_angles(
+        static_cast<float>(cmd_j1),
+        static_cast<float>(cmd_j2),
+        static_cast<float>(cmd_j3),
+        SPD, false);
+
+      std::this_thread::sleep_for(std::chrono::microseconds(dwell));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Service handler — smooth_move
+  //
+  // Moves arm from current position to target via a safe-corridor waypoint
+  // planner. Walks J2 from start to target in PLAN_STEPS equal increments;
+  // at each step J3 is linearly interpolated then clamped to j3_safe_min(j2).
+  // J1 is linearly interpolated throughout.
+  //
+  // Physically verified path: reset(J2=90,J3=0)→(60,10)→(40,20)→(30,26)→(21,32)
+  // ---------------------------------------------------------------------------
+  void handle_smooth_move(
+    const std::shared_ptr<swiftpro_resources::srv::SmoothMove::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::SmoothMove::Response> res)
+  {
+    namespace kin = swiftpro::kinematics;
+
+    if (!swift_ || !swift_->connected) {
+      res->success = false;
+      res->message = "Arm not connected";
+      return;
+    }
+
+    const int reachable = swift_->is_reachable(
+      static_cast<float>(req->x),
+      static_cast<float>(req->y),
+      static_cast<float>(req->z));
+    if (reachable == 0) {
+      res->success = false;
+      res->message = "Target position unreachable";
+      return;
+    }
+
+    const double speed = (req->speed > 0.0) ? req->speed : 150.0;
+
+    const auto angles = swift_->get_servo_angle();
+    if (angles.size() < 3) {
+      res->success = false;
+      res->message = "Failed to read current joint angles";
+      return;
+    }
+    const double s_j1 = static_cast<double>(angles[0]);
+    const double s_j2 = static_cast<double>(angles[1]);
+    const double s_j3 = static_cast<double>(angles[2]);
+
+    double t_j1, t_j2, t_j3;
+    std::string msg;
+    if (!kin::ik(req->x, req->y, req->z, t_j1, t_j2, t_j3, msg)) {
+      res->success = false;
+      res->message = "Target IK failed: " + msg;
+      RCLCPP_WARN(get_logger(), "smooth_move target IK: %s", msg.c_str());
+      return;
+    }
+
+    constexpr int PLAN_STEPS = 20;
+
+    struct Waypoint { double j1, j2, j3; };
+    std::vector<Waypoint> waypoints;
+
+    double prev_j2 = s_j2, prev_j3 = s_j3;
+
+    for (int i = 1; i <= PLAN_STEPS; ++i) {
+      const double t   = static_cast<double>(i) / PLAN_STEPS;
+      const double j1  = s_j1 + t * (t_j1 - s_j1);
+      const double j2  = s_j2 + t * (t_j2 - s_j2);
+      const double j3l = s_j3 + t * (t_j3 - s_j3);
+      const double j3  = std::max(j3l, kin::j3_safe_min(j2));
+
+      const double dj = std::abs(j2 - prev_j2) + std::abs(j3 - prev_j3);
+      if (dj > 0.5 || i == PLAN_STEPS) {
+        waypoints.push_back({j1, j2, j3});
+        prev_j2 = j2; prev_j3 = j3;
+      }
+    }
+
+    RCLCPP_INFO(get_logger(),
+                "smooth_move: (%.1f,%.1f,%.1f)→(%.1f,%.1f,%.1f) via %zu waypoints",
+                s_j1, s_j2, s_j3, t_j1, t_j2, t_j3, waypoints.size());
+
+    double cur_j1 = s_j1, cur_j2 = s_j2, cur_j3 = s_j3;
+    for (const auto& wp : waypoints) {
+      execute_segment(cur_j1, cur_j2, cur_j3, wp.j1, wp.j2, wp.j3, speed);
+      cur_j1 = wp.j1; cur_j2 = wp.j2; cur_j3 = wp.j3;
+    }
+
+    if (req->wait) {
+      std::unique_lock<std::mutex> lock(motion_mutex_);
+      motion_done_ = false;
+      const bool done = motion_cv_.wait_for(
+        lock, std::chrono::seconds(10),
+        [this] { return motion_done_; });
+      if (!done) {
+        RCLCPP_WARN(get_logger(), "smooth_move: wait timeout");
+      }
+    }
+
+    res->success = true;
+    res->message = "OK";
+  }
+
+  // ---------------------------------------------------------------------------
   // Service handlers — motion
   // ---------------------------------------------------------------------------
+
+  void handle_reset(
+    const std::shared_ptr<swiftpro_resources::srv::Reset::Request>  req,
+          std::shared_ptr<swiftpro_resources::srv::Reset::Response> res)
+  {
+    if (!swift_ || !swift_->connected) { res->success = false; return; }
+    const float x = (req->x > 0.0f)  ? req->x : 200.0f;
+    const float y = (req->y != 0.0f) ? req->y :   0.0f;
+    const float z = (req->z > 0.0f)  ? req->z : 150.0f;
+    swift_->reset(static_cast<long>(req->speed), 10.0f, x, y, z);
+    res->success = true;
+    RCLCPP_INFO(get_logger(),
+                "reset: x=%.1f y=%.1f z=%.1f", x, y, z);
+  }
 
   void handle_set_polar(
     const std::shared_ptr<swiftpro_resources::srv::SetPolar::Request>  req,
@@ -605,7 +852,8 @@ private:
     }
     const int r = swift_->set_wrist(req->angle, static_cast<long>(req->speed));
     res->success = (r == 0); res->error_code = r;
-    RCLCPP_INFO(get_logger(), "set_wrist: angle=%.1f result=%d", req->angle, r);
+    RCLCPP_INFO(get_logger(), "set_wrist: angle=%.1f result=%d",
+                req->angle, r);
   }
 
   void handle_set_servo_angle(
@@ -627,48 +875,50 @@ private:
     const std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Request>  req,
           std::shared_ptr<swiftpro_resources::srv::SetServoAngles::Response> res)
   {
-    RCLCPP_INFO(get_logger(),
-                "set_servo_angles: j1=%.1f j2=%.1f j3=%.1f speed=%d wait=%d",
-                req->j1, req->j2, req->j3, req->speed, req->wait);
-
     if (!swift_ || !swift_->connected) {
       RCLCPP_WARN(get_logger(), "set_servo_angles: arm not connected");
       res->success = false; return;
     }
 
-    const long spd = (req->speed > 0) ? static_cast<long>(req->speed) : default_speed;
+    const long spd = (req->speed > 0)
+      ? static_cast<long>(req->speed) : default_speed;
+
+    // Use set_joint_angles when all three are specified; fall back to
+    // individual set_servo_angle calls when any axis is -1 (leave unchanged).
     bool ok = true;
-    int  r;
+    if (req->j1 >= 0.0f && req->j2 >= 0.0f && req->j3 >= 0.0f) {
+      const int r = swift_->set_joint_angles(req->j1, req->j2, req->j3, spd, false);
+      ok = (r == 0);
+      RCLCPP_INFO(get_logger(),
+                  "set_servo_angles: j1=%.1f j2=%.1f j3=%.1f spd=%ld result=%d",
+                  req->j1, req->j2, req->j3, spd, r);
+    } else {
+      if (req->j1 >= 0.0f) {
+        const int r = swift_->set_servo_angle(0, req->j1, spd, false);
+        ok &= (r == 0);
+        RCLCPP_INFO(get_logger(), "set_servo_angles: j1=%.1f result=%d", req->j1, r);
+      }
+      if (req->j2 >= 0.0f) {
+        const int r = swift_->set_servo_angle(1, req->j2, spd, false);
+        ok &= (r == 0);
+        RCLCPP_INFO(get_logger(), "set_servo_angles: j2=%.1f result=%d", req->j2, r);
+      }
+      if (req->j3 >= 0.0f) {
+        const int r = swift_->set_servo_angle(2, req->j3, spd, false);
+        ok &= (r == 0);
+        RCLCPP_INFO(get_logger(), "set_servo_angles: j3=%.1f result=%d", req->j3, r);
+      }
+    }
 
-    if (req->j1 >= 0.0f) {
-      r = swift_->set_servo_angle(0, req->j1, spd, false);
-      RCLCPP_INFO(get_logger(),
-                  "set_servo_angles: j1=%.1f speed=%ld result=%d", req->j1, spd, r);
-    }
-    if (req->j2 >= 0.0f) {
-      r = swift_->set_servo_angle(1, req->j2, spd, false);
-      RCLCPP_INFO(get_logger(),
-                  "set_servo_angles: j2=%.1f speed=%ld result=%d", req->j2, spd, r);
-    }
-    if (req->j3 >= 0.0f) {
-      r = swift_->set_servo_angle(2, req->j3, spd, false);
-      RCLCPP_INFO(get_logger(),
-                  "set_servo_angles: j3=%.1f speed=%ld result=%d", req->j3, spd, r);
-    }
-
-    if (req->wait && ok)
-    {
-      std::this_thread::sleep_for(std::chrono::milliseconds(300));
-      constexpr auto timeout   = std::chrono::seconds(15);
-      constexpr auto poll_step = std::chrono::milliseconds(100);
-      const auto     start     = std::chrono::steady_clock::now();
-      while (true) {
-        if (swift_->get_is_moving() == 0) { break; }
-        if (std::chrono::steady_clock::now() - start > timeout) {
-          RCLCPP_WARN(get_logger(), "set_servo_angles: wait timeout");
-          ok = false; break;
-        }
-        std::this_thread::sleep_for(poll_step);
+    if (req->wait && ok) {
+      std::unique_lock<std::mutex> lock(motion_mutex_);
+      motion_done_ = false;
+      const bool done = motion_cv_.wait_for(
+        lock, std::chrono::seconds(15),
+        [this] { return motion_done_; });
+      if (!done) {
+        RCLCPP_WARN(get_logger(), "set_servo_angles: wait timeout");
+        ok = false;
       }
     }
 
@@ -677,209 +927,40 @@ private:
                 ok ? "true" : "false");
   }
 
-  // ---------------------------------------------------------------------------
-  // Service handler — smooth_move
-  //
-  // Moves the arm from current position to target via an automatic arc:
-  //
-  //   current → via → target
-  //
-  // The via point is the XY midpoint of current and target, lifted in Z:
-  //   via_x = (cur_x + tgt_x) / 2
-  //   via_y = (cur_y + tgt_y) / 2
-  //   via_z = max(cur_z, tgt_z) + lift   (default lift = 50mm)
-  //
-  // Each leg (current→via, via→target) is executed as a direct interpolated
-  // move using sine ease-in/ease-out in joint space. Step count scales with
-  // leg distance so short legs are fast and long legs are smooth.
-  //
-  // This produces a natural pick-and-place arc without the noise of the
-  // firmware's continuous servo correction trajectory planner.
-  // ---------------------------------------------------------------------------
-
-  // Execute one interpolated segment: current angles → target angles.
-  // Steps scale with tip distance for consistent apparent speed.
-  void execute_segment(double s_j1, double s_j2, double s_j3,
-                       double t_j1, double t_j2, double t_j3,
-                       double speed_mms)
+  void handle_pause_motion(
+    const std::shared_ptr<swiftpro_resources::srv::PauseMotion::Request>  /*req*/,
+          std::shared_ptr<swiftpro_resources::srv::PauseMotion::Response> res)
   {
-    namespace kin = swiftpro::kinematics;
-
-    double sx, sy, sz, tx, ty, tz;
-    kin::fk(s_j1, s_j2, s_j3, sx, sy, sz);
-    kin::fk(t_j1, t_j2, t_j3, tx, ty, tz);
-
-    const double dist  = std::sqrt((tx-sx)*(tx-sx) +
-                                   (ty-sy)*(ty-sy) +
-                                   (tz-sz)*(tz-sz));
-    const double dur   = std::max(dist / speed_mms, 0.2);
-    const int    steps = static_cast<int>(
-                           std::clamp(dist / 25.0, 4.0, 12.0));
-    const int    dwell = static_cast<int>((dur / steps) * 1e6);
-
-    // Joint speed: scale with largest joint delta so servos track the steps
-    const double max_j_delta = std::max({std::abs(t_j1-s_j1),
-                                         std::abs(t_j2-s_j2),
-                                         std::abs(t_j3-s_j3)});
-    const long SPD = static_cast<long>(std::clamp(max_j_delta * 80.0, 200.0, 2000.0));
-
-    for (int i = 1; i <= steps; ++i)
-    {
-      const double u = static_cast<double>(i) / steps;
-      const double t = 0.5 * (1.0 - std::cos(M_PI * u));
-
-      const double cmd_j1 = s_j1 + t*(t_j1-s_j1);
-      const double cmd_j2 = s_j2 + t*(t_j2-s_j2);
-      const double raw_j3 = s_j3 + t*(t_j3-s_j3);
-      // Safety clamp — enforce linkage constraints at every step
-      const double cmd_j3 = std::max(raw_j3,
-                              swiftpro::kinematics::j3_safe_min(cmd_j2));
-      if (cmd_j3 != raw_j3) {
-        RCLCPP_WARN_ONCE(get_logger(),
-          "execute_segment: J3 clamped %.1f→%.1f at J2=%.1f",
-          raw_j3, cmd_j3, cmd_j2);
-      }
-
-      swift_->set_servo_angle(0, static_cast<float>(cmd_j1), SPD, false);
-      swift_->set_servo_angle(1, static_cast<float>(cmd_j2), SPD, false);
-      swift_->set_servo_angle(2, static_cast<float>(cmd_j3), SPD, false);
-
-      std::this_thread::sleep_for(std::chrono::microseconds(dwell));
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Service handler — smooth_move
-  //
-  // Moves the arm from current position to target via an automatic arc:
-  //
-  //   current → via → target
-  //
-  // The via point is the XY midpoint of current and target, lifted in Z:
-  //   via_x = (cur_x + tgt_x) / 2
-  //   via_y = (cur_y + tgt_y) / 2
-  //   via_z = max(cur_z, tgt_z) + lift   (default lift = 50mm)
-  //
-  // Each leg (current→via, via→target) is executed as a direct interpolated
-  // move using sine ease-in/ease-out in joint space. Step count scales with
-  // leg distance so short legs are fast and long legs are smooth.
-  //
-  // This produces a natural pick-and-place arc without the noise of the
-  // firmware's continuous servo correction trajectory planner.
-  // ---------------------------------------------------------------------------
-  void handle_smooth_move(
-    const std::shared_ptr<swiftpro_resources::srv::SmoothMove::Request>  req,
-          std::shared_ptr<swiftpro_resources::srv::SmoothMove::Response> res)
-  {
-    namespace kin = swiftpro::kinematics;
-
     if (!swift_ || !swift_->connected) {
-      res->success = false;
-      res->message = "Arm not connected";
-      return;
+      res->success = false; res->error_code = -1; return;
     }
-
-    const double speed = (req->speed > 0.0) ? req->speed : 150.0;
-
-    // ── Current joint angles ─────────────────────────────────────────────────
-    const auto angles = swift_->get_servo_angle();
-    if (angles.size() < 3) {
-      res->success = false;
-      res->message = "Failed to read current joint angles";
-      return;
-    }
-    const double s_j1 = static_cast<double>(angles[0]);
-    const double s_j2 = static_cast<double>(angles[1]);
-    const double s_j3 = static_cast<double>(angles[2]);
-
-    // ── IK for target ────────────────────────────────────────────────────────
-    double t_j1, t_j2, t_j3;
-    std::string msg;
-    if (!kin::ik(req->x, req->y, req->z, t_j1, t_j2, t_j3, msg)) {
-      res->success = false;
-      res->message = "Target IK failed: " + msg;
-      RCLCPP_WARN(get_logger(), "smooth_move target IK: %s", msg.c_str());
-      return;
-    }
-
-    // ── Safe-corridor waypoint planner ───────────────────────────────────────
-    //
-    // Walks J2 from start to target in PLAN_STEPS equal increments.
-    // At each step, J3 is the linear interpolation of start→target J3,
-    // clamped up to j3_safe_min(j2) if needed.
-    // J1 is linearly interpolated throughout.
-    //
-    // This mirrors the manual stepped approach that was physically verified:
-    //   reset(J2=90,J3=0) → (60,10) → (40,20) → (30,26) → (21,32) ✓
-    //
-    // Waypoints where the clamped J3 equals the linear J3 are collapsed —
-    // only waypoints where the clamp actually changes the path are kept,
-    // plus the final target.
-
-    constexpr int PLAN_STEPS = 20;
-
-    struct Waypoint { double j1, j2, j3; };
-    std::vector<Waypoint> waypoints;
-
-    double prev_j1 = s_j1, prev_j2 = s_j2, prev_j3 = s_j3;
-
-    for (int i = 1; i <= PLAN_STEPS; ++i) {
-      const double t   = static_cast<double>(i) / PLAN_STEPS;
-      const double j1  = s_j1 + t * (t_j1 - s_j1);
-      const double j2  = s_j2 + t * (t_j2 - s_j2);
-      const double j3l = s_j3 + t * (t_j3 - s_j3);          // linear J3
-      const double j3  = std::max(j3l, kin::j3_safe_min(j2)); // clamped J3
-
-      // Only emit waypoint if position changed meaningfully
-      const double dj = std::abs(j2 - prev_j2) + std::abs(j3 - prev_j3);
-      if (dj > 0.5 || i == PLAN_STEPS) {
-        waypoints.push_back({j1, j2, j3});
-        prev_j1 = j1; prev_j2 = j2; prev_j3 = j3;
-      }
-    }
-
-    RCLCPP_INFO(get_logger(),
-                "smooth_move: (%.1f,%.1f,%.1f)→(%.1f,%.1f,%.1f) via %zu waypoints",
-                s_j1, s_j2, s_j3, t_j1, t_j2, t_j3, waypoints.size());
-
-    // ── Execute waypoint sequence ────────────────────────────────────────────
-    double cur_j1 = s_j1, cur_j2 = s_j2, cur_j3 = s_j3;
-    for (const auto& wp : waypoints) {
-      execute_segment(cur_j1, cur_j2, cur_j3, wp.j1, wp.j2, wp.j3, speed);
-      cur_j1 = wp.j1; cur_j2 = wp.j2; cur_j3 = wp.j3;
-    }
-
-    // ── Optional wait for settle ─────────────────────────────────────────────
-    if (req->wait) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-      constexpr auto timeout   = std::chrono::seconds(10);
-      constexpr auto poll_step = std::chrono::milliseconds(50);
-      const auto     start     = std::chrono::steady_clock::now();
-      while (swift_->get_is_moving() == 1) {
-        if (std::chrono::steady_clock::now() - start > timeout) {
-          RCLCPP_WARN(get_logger(), "smooth_move: wait timeout");
-          break;
-        }
-        std::this_thread::sleep_for(poll_step);
-      }
-    }
-
-    res->success = true;
-    res->message = "OK";
+    const int r  = swift_->pause_motion();
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "pause_motion: result=%d", r);
   }
 
-  void handle_reset(
-    const std::shared_ptr<swiftpro_resources::srv::Reset::Request>  req,
-          std::shared_ptr<swiftpro_resources::srv::Reset::Response> res)
+  void handle_resume_motion(
+    const std::shared_ptr<swiftpro_resources::srv::ResumeMotion::Request>  /*req*/,
+          std::shared_ptr<swiftpro_resources::srv::ResumeMotion::Response> res)
   {
-    if (!swift_ || !swift_->connected) { res->success = false; return; }
-    const float x = (req->x > 0.0f)  ? req->x : 200.0f;
-    const float y = (req->y != 0.0f) ? req->y :   0.0f;
-    const float z = (req->z > 0.0f)  ? req->z : 150.0f;
-    swift_->reset(static_cast<long>(req->speed), 10.0f, x, y, z);
-    res->success = true;
-    RCLCPP_INFO(get_logger(),
-                "reset: complete — x=%.1f y=%.1f z=%.1f", x, y, z);
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
+    }
+    const int r  = swift_->resume_motion();
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "resume_motion: result=%d", r);
+  }
+
+  void handle_motion_reset(
+    const std::shared_ptr<swiftpro_resources::srv::MotionReset::Request>  /*req*/,
+          std::shared_ptr<swiftpro_resources::srv::MotionReset::Response> res)
+  {
+    if (!swift_ || !swift_->connected) {
+      res->success = false; res->error_code = -1; return;
+    }
+    const int r  = swift_->motion_reset();
+    res->success = (r == 0); res->error_code = r;
+    RCLCPP_INFO(get_logger(), "motion_reset: result=%d", r);
   }
 
   // ---------------------------------------------------------------------------
@@ -981,7 +1062,8 @@ private:
     }
     const int r = swift_->set_acceleration(req->acc);
     res->success = (r == 0); res->error_code = r;
-    RCLCPP_INFO(get_logger(), "set_acceleration: acc=%.2f result=%d", req->acc, r);
+    RCLCPP_INFO(get_logger(), "set_acceleration: acc=%.2f result=%d",
+                req->acc, r);
   }
 
   // ---------------------------------------------------------------------------
@@ -1034,6 +1116,23 @@ private:
     res->success = (r >= 0);
   }
 
+  void handle_get_encoder_status(
+    const std::shared_ptr<swiftpro_resources::srv::GetEncoderStatus::Request>  /*req*/,
+          std::shared_ptr<swiftpro_resources::srv::GetEncoderStatus::Response> res)
+  {
+    if (!swift_ || !swift_->connected) {
+      res->status = -1; res->success = false; return;
+    }
+    const int r  = swift_->get_encoder_status();
+    res->status  = r;
+    res->success = (r >= 0);
+    if (r > 0) {
+      RCLCPP_WARN(get_logger(),
+                  "get_encoder_status: fault bitfield=0x%x "
+                  "(bit0=base bit1=right bit2=left)", r);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Member variables
   // ---------------------------------------------------------------------------
@@ -1046,6 +1145,10 @@ private:
 
   std::mutex         position_mutex_;
   std::vector<float> current_position_;
+
+  std::mutex              motion_mutex_;
+  std::condition_variable motion_cv_;
+  bool                    motion_done_{false};
 
   static SwiftProHardware* instance_;
 
@@ -1079,7 +1182,11 @@ private:
   rclcpp::Service<swiftpro_resources::srv::GetDigital>::SharedPtr          get_digital_srv_;
   rclcpp::Service<swiftpro_resources::srv::GetAnalog>::SharedPtr           get_analog_srv_;
   rclcpp::Service<swiftpro_resources::srv::GetServoAttach>::SharedPtr      get_servo_attach_srv_;
+  rclcpp::Service<swiftpro_resources::srv::GetEncoderStatus>::SharedPtr    get_encoder_status_srv_;
   rclcpp::Service<swiftpro_resources::srv::SmoothMove>::SharedPtr          smooth_move_srv_;
+  rclcpp::Service<swiftpro_resources::srv::PauseMotion>::SharedPtr         pause_motion_srv_;
+  rclcpp::Service<swiftpro_resources::srv::ResumeMotion>::SharedPtr        resume_motion_srv_;
+  rclcpp::Service<swiftpro_resources::srv::MotionReset>::SharedPtr         motion_reset_srv_;
 
   rclcpp::TimerBase::SharedPtr publish_timer_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;

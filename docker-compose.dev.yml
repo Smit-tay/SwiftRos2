@@ -22,4 +22,6 @@ ervices:
       DISPLAY: $DISPLAY
     cap_add:
       - SYS_NICE
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0      
  
