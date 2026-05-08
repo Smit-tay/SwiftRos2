@@ -10,15 +10,14 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-
 find_package(swiftpro_kinematics REQUIRED)
 find_package(swiftpro_resources REQUIRED)
 
 # -----------------------------------------------------------------------------
-# uarm library
+# uarm library (vendored, non-ROS)
 # -----------------------------------------------------------------------------
-add_subdirectory(lib)
-
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libuarm
+                 ${CMAKE_CURRENT_BINARY_DIR}/libuarm)
 install(TARGETS uarm
   LIBRARY DESTINATION lib
 )
@@ -27,13 +26,10 @@ install(TARGETS uarm
 # Hardware node
 # -----------------------------------------------------------------------------
 add_executable(swiftpro_hardware src/swiftpro_hardware.cpp)
-
 target_include_directories(swiftpro_hardware
   PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/include
     ${swiftpro_kinematics_INCLUDE_DIRS}
 )
-
 ament_target_dependencies(swiftpro_hardware
   geometry_msgs
   rclcpp
@@ -43,11 +39,9 @@ ament_target_dependencies(swiftpro_hardware
   swiftpro_kinematics
   swiftpro_resources
 )
-
 target_link_libraries(swiftpro_hardware
   uarm
 )
-
 install(TARGETS swiftpro_hardware
   DESTINATION lib/${PROJECT_NAME}
 )
