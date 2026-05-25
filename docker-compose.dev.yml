@@ -1,4 +1,4 @@
-ervices:
+services:
   swiftros2_dev:
     build:
       context: .
@@ -11,7 +11,7 @@ ervices:
     container_name: swiftros2_dev
     network_mode: "host"
     userns_mode: "keep-id"
-    command: /bin/bash
+    command: sleep infinity
     tty: true
     stdin_open: true
     volumes:
@@ -23,5 +23,7 @@ ervices:
     cap_add:
       - SYS_NICE
     devices:
-      - /dev/ttyACM0:/dev/ttyACM0      
+      - /dev/ttyACM0:/dev/ttyACM0
+    group_add:
+      - "dialout"
  

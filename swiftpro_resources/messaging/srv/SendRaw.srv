@@ -1,0 +1,8 @@
+# Send a raw GRBL command (e.g. "$11=0.5"). Power-user escape hatch.
+# Response is the raw firmware response string.
+string command
+float32 timeout
+---
+string response
+bool success
+int32 error_code

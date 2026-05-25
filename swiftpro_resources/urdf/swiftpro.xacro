@@ -1,45 +1,46 @@
 <?xml version="1.0"?>
 <!-- swiftpro.xacro -->
-<!-- Copyright 2025 Jack Sidman Smith -->
+<!-- Copyright 2026 Jack Sidman Smith -->
 <!-- Licensed under the MIT License. See LICENSE in project root. -->
 <!--
   UArm Swift Pro URDF with parallel linkage constraints.
 
-  The arm has 3 physical servos:
-    Joint1 — base rotation       (servo 0)  Z axis
-    Joint2 — shoulder elevation  (servo 1)  Y axis
-    Joint3 — elbow/forearm       (servo 2)  Y axis
+  The arm has 3 physical servos. Joint names follow the libswiftpro
+  convention used throughout SwiftRos2:
+    base   — base rotation       (servo 0)  Z axis
+    left   — shoulder elevation  (servo 1)  Y axis
+    right  — elbow / forearm     (servo 2)  Y axis
 
   All other joints are mechanically constrained by the parallel linkage
   and expressed as <mimic> joints. robot_state_publisher computes and
-  broadcasts their values automatically from Joint1/2/3.
+  broadcasts their values automatically from base/left/right.
 
   The hardware node (swiftpro_hardware) publishes JointState for
-  Joint1, Joint2, Joint3 only.
+  base, left, right only.
 
   Parallel linkage geometry — two four-bar loops:
 
   Loop 1 — upper arm parallelogram:
-    Link2  (Joint2) — upper arm front rod      — driven by servo 1
-    Link5  (Joint5) — upper arm rear rod       — mimics Joint2 × -1.0
-    Link4  (Joint4) — triangular connector     — mimics Joint3 × +1.0
+    Link2  (left)         — upper arm front rod — driven by servo 1
+    Link5  (link5_mimic)  — upper arm rear rod  — mimics left × -1.0
+    Link4  (link4_mimic)  — triangular connector — mimics right × +1.0
     The triangle (Link4) transfers elbow rotation to the wrist chain.
     Shoulder movement is fully cancelled within this loop — it never
     reaches the end effector.
 
   Loop 2 — wrist parallelogram:
-    Link6  (Joint6) — wrist rear upper         — mimics Joint2 × +1.0
-    Link7  (Joint7) — wrist rear lower         — mimics Joint3 × +1.0
-    Link8  (Joint8) — end effector mount       — mimics Joint3 × -1.0
-    Only elbow rotation (Joint3) reaches the end effector.
-    Joint8 cancels it to keep the gripper level.
+    Link6  (link6_mimic)  — wrist rear upper — mimics left  × +1.0
+    Link7  (link7_mimic)  — wrist rear lower — mimics right × +1.0
+    Link8  (link8_mimic)  — end effector mount — mimics right × -1.0
+    Only elbow rotation (right) reaches the end effector.
+    link8_mimic cancels it to keep the gripper level.
 
   Verified against physical hardware:
     - Moving shoulder only: forearm links stay parallel ✓
     - Moving elbow only:    upper arm links stay parallel ✓
-    - Joint8 compensation source is Joint3, not Joint2 ✓
+    - link8_mimic compensation source is right, not left ✓
 
-  Joint9 is fixed — the gripper jaw is not servo-driven in the
+  link9_fixed is fixed — the gripper jaw is not servo-driven in the
   base UArm Swift Pro configuration.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="swiftpro">
@@ -78,7 +79,7 @@
 
 <!-- ============================================================ -->
 <!-- Link1 — base turntable                                        -->
-<!-- Joint1 — base rotation (Z axis) — SERVO 0                    -->
+<!-- base — base rotation (Z axis) — SERVO 0                       -->
 <!-- ============================================================ -->
 <link name="Link1">
   <inertial>
@@ -96,7 +97,7 @@
   </visual>
 </link>
 
-<joint name="Joint1" type="revolute">
+<joint name="base" type="revolute">
   <axis xyz="0 0 1"/>
   <limit effort="1000.0" lower="-1.57" upper="1.57" velocity="2.0"/>
   <parent link="Base"/>
@@ -106,7 +107,7 @@
 
 <!-- ============================================================ -->
 <!-- Link2 — upper arm front rod                                   -->
-<!-- Joint2 — shoulder elevation (Y axis) — SERVO 1               -->
+<!-- left — shoulder elevation (Y axis) — SERVO 1                  -->
 <!-- ============================================================ -->
 <link name="Link2">
   <inertial>
@@ -124,7 +125,7 @@
   </visual>
 </link>
 
-<joint name="Joint2" type="revolute">
+<joint name="left" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-1.57" upper="1.57" velocity="2.0"/>
   <parent link="Link1"/>
@@ -134,7 +135,7 @@
 
 <!-- ============================================================ -->
 <!-- Link3 — forearm                                               -->
-<!-- Joint3 — elbow (Y axis) — SERVO 2                            -->
+<!-- right — elbow (Y axis) — SERVO 2                              -->
 <!-- ============================================================ -->
 <link name="Link3">
   <inertial>
@@ -152,7 +153,7 @@
   </visual>
 </link>
 
-<joint name="Joint3" type="revolute">
+<joint name="right" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-1.45" upper="1.45" velocity="2.0"/>
   <parent link="Link2"/>
@@ -162,9 +163,9 @@
 
 <!-- ============================================================ -->
 <!-- Link4 — triangular connector                                  -->
-<!-- Joint4 — mimics Joint3 × +1.0                                -->
+<!-- link4_mimic — mimics right × +1.0                             -->
 <!-- Transfers elbow rotation to the wrist chain.                  -->
-<!-- Pivots at the same point as Joint3 on Link2.                  -->
+<!-- Pivots at the same point as 'right' on Link2.                 -->
 <!-- ============================================================ -->
 <link name="Link4">
   <inertial>
@@ -182,20 +183,20 @@
   </visual>
 </link>
 
-<joint name="Joint4" type="revolute">
+<joint name="link4_mimic" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-3" upper="3" velocity="2.0"/>
   <parent link="Link2"/>
   <child link="Link4"/>
   <origin xyz="0 0 0.14207" rpy="0 0 0"/>
-  <mimic joint="Joint3" multiplier="1.0" offset="0.0"/>
+  <mimic joint="right" multiplier="1.0" offset="0.0"/>
 </joint>
 
 <!-- ============================================================ -->
 <!-- Link5 — upper arm rear rod                                    -->
-<!-- Joint5 — mimics Joint2 × -1.0                                -->
+<!-- link5_mimic — mimics left × -1.0                              -->
 <!-- Closes the upper arm parallelogram loop.                      -->
-<!-- Pivots on Link1 below Joint2.                                 -->
+<!-- Pivots on Link1 below 'left'.                                 -->
 <!-- ============================================================ -->
 <link name="Link5">
   <inertial>
@@ -213,18 +214,18 @@
   </visual>
 </link>
 
-<joint name="Joint5" type="revolute">
+<joint name="link5_mimic" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-3" upper="3" velocity="2.0"/>
   <parent link="Link1"/>
   <child link="Link5"/>
   <origin xyz="-0.0215 0 0.05001" rpy="0 0 0"/>
-  <mimic joint="Joint2" multiplier="-1.0" offset="0.0"/>
+  <mimic joint="left" multiplier="-1.0" offset="0.0"/>
 </joint>
 
 <!-- ============================================================ -->
 <!-- Link6 — wrist rear upper rod                                  -->
-<!-- Joint6 — mimics Joint2 × +1.0                                -->
+<!-- link6_mimic — mimics left × +1.0                              -->
 <!-- Follows shoulder rotation to position the wrist chain.        -->
 <!-- ============================================================ -->
 <link name="Link6">
@@ -243,18 +244,18 @@
   </visual>
 </link>
 
-<joint name="Joint6" type="revolute">
+<joint name="link6_mimic" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-3" upper="3" velocity="2.0"/>
   <parent link="Link1"/>
   <child link="Link6"/>
   <origin xyz="0.0132 0 0.0333" rpy="0 0 0"/>
-  <mimic joint="Joint2" multiplier="1.0" offset="0.0"/>
+  <mimic joint="left" multiplier="1.0" offset="0.0"/>
 </joint>
 
 <!-- ============================================================ -->
 <!-- Link7 — wrist rear lower rod                                  -->
-<!-- Joint7 — mimics Joint3 × +1.0                                -->
+<!-- link7_mimic — mimics right × +1.0                             -->
 <!-- Transfers elbow rotation through the wrist rear chain.        -->
 <!-- ============================================================ -->
 <link name="Link7">
@@ -273,21 +274,21 @@
   </visual>
 </link>
 
-<joint name="Joint7" type="revolute">
+<joint name="link7_mimic" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-3" upper="3" velocity="2.0"/>
   <parent link="Link6"/>
   <child link="Link7"/>
   <origin xyz="-0.0455 0 -0.00301" rpy="0 0 0"/>
-  <mimic joint="Joint3" multiplier="1.0" offset="0.0"/>
+  <mimic joint="right" multiplier="1.0" offset="0.0"/>
 </joint>
 
 <!-- ============================================================ -->
 <!-- Link8 — end effector mount / gripper body                     -->
-<!-- Joint8 — mimics Joint3 × -1.0                                -->
+<!-- link8_mimic — mimics right × -1.0                             -->
 <!-- Cancels elbow rotation to keep the gripper level.             -->
 <!-- Shoulder movement is already cancelled by the upper arm       -->
-<!-- parallelogram (Joint5) and never reaches here.               -->
+<!-- parallelogram (link5_mimic) and never reaches here.           -->
 <!-- Verified against physical hardware.                           -->
 <!-- ============================================================ -->
 <link name="Link8">
@@ -306,21 +307,21 @@
   </visual>
 </link>
 
-<joint name="Joint8" type="revolute">
+<joint name="link8_mimic" type="revolute">
   <axis xyz="0 1 0"/>
   <limit effort="1000.0" lower="-3" upper="3" velocity="2.0"/>
   <parent link="Link3"/>
   <child link="Link8"/>
   <origin xyz="0.15852 0 0" rpy="0 0 0"/>
-  <mimic joint="Joint3" multiplier="-1.0" offset="0.0"/>
+  <mimic joint="right" multiplier="-1.0" offset="0.0"/>
 </joint>
 
 <!-- ============================================================ -->
 <!-- Link9 — gripper jaw / tool tip                                -->
-<!-- Joint9 — fixed                                                -->
-<!-- Not servo-driven in the base UArm Swift Pro configuration.   -->
+<!-- link9_fixed — fixed                                           -->
+<!-- Not servo-driven in the base UArm Swift Pro configuration.    -->
 <!-- Change to revolute + mimic if a wrist rotation servo is       -->
-<!-- fitted.                                                        -->
+<!-- fitted.                                                       -->
 <!-- ============================================================ -->
 <link name="Link9">
   <inertial>
@@ -338,7 +339,7 @@
   </visual>
 </link>
 
-<joint name="Joint9" type="fixed">
+<joint name="link9_fixed" type="fixed">
   <parent link="Link8"/>
   <child link="Link9"/>
   <origin xyz="0.02741 0 0.02703" rpy="0 0 0"/>

@@ -13,32 +13,41 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   # Actions
   "messaging/action/MoveArm.action"
-  # Services — existing
-  "messaging/srv/MoveTo.srv"
-  "messaging/srv/Reset.srv"
-  "messaging/srv/SetGripper.srv"
-  "messaging/srv/SetPump.srv"
-  # Services — new
+  # Services — kinematics queries (firmware-side)
+  "messaging/srv/AnglesToCoord.srv"
+  "messaging/srv/CoordToAngles.srv"
+  "messaging/srv/IsReachable.srv"
+  # Services — kinematics queries (node-side)
   "messaging/srv/ComputeFK.srv"
   "messaging/srv/ComputeIK.srv"
-  "messaging/srv/GetAnalog.srv"
-  "messaging/srv/GetDigital.srv"
-  "messaging/srv/GetEncoderStatus.srv"
-  "messaging/srv/GetServoAttach.srv"
-  "messaging/srv/MotionReset.srv"
+  # Services — motion
+  "messaging/srv/MoveTo.srv"
   "messaging/srv/PauseMotion.srv"
   "messaging/srv/ResumeMotion.srv"
-  "messaging/srv/SetAcceleration.srv"
-  "messaging/srv/SetBuzzer.srv"
-  "messaging/srv/SetDigitalDirection.srv"
-  "messaging/srv/SetDigitalOutput.srv"
-  "messaging/srv/SetMode.srv"
+  "messaging/srv/MotionReset.srv"
+  "messaging/srv/Reset.srv"
   "messaging/srv/SetPolar.srv"
   "messaging/srv/SetServoAngle.srv"
   "messaging/srv/SetServoAngles.srv"
-  "messaging/srv/SetServoAttach.srv"
   "messaging/srv/SetWrist.srv"
-  "messaging/srv/SmoothMove.srv"
+  # Services — end effectors
+  "messaging/srv/SetGripper.srv"
+  "messaging/srv/SetPump.srv"
+  "messaging/srv/SetBuzzer.srv"
+  # Services — configuration
+  "messaging/srv/SetAcceleration.srv"
+  "messaging/srv/SetMode.srv"
+  # Services — servo management
+  "messaging/srv/SetServoAttach.srv"
+  "messaging/srv/GetServoAttach.srv"
+  "messaging/srv/GetEncoderStatus.srv"
+  # Services — GPIO
+  "messaging/srv/SetDigitalDirection.srv"
+  "messaging/srv/SetDigitalOutput.srv"
+  "messaging/srv/GetDigital.srv"
+  "messaging/srv/GetAnalog.srv"
+  # Services — raw passthrough
+  "messaging/srv/SendRaw.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

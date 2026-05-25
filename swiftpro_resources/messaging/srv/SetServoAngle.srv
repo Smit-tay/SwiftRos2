@@ -1,7 +1,6 @@
 int32 servo_id
 float32 angle
 int32 speed
-bool wait
 ---
 bool success
 int32 error_code

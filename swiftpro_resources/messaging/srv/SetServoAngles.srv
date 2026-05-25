@@ -1,7 +1,6 @@
 float32 j1   # degrees; -1.0 = leave unchanged
 float32 j2
 float32 j3
-int32 speed     # 0 = use default (10000)
-bool wait       # true = block until motion complete; false = return after serial ACK
+float32 speed     # 0 = use default (10000)
 ---
 bool success
