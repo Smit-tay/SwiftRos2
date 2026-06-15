@@ -11,15 +11,18 @@ services:
     container_name: swiftros2_dev
     network_mode: "host"
     userns_mode: "keep-id"
+    ipc: "host" 
     command: sleep infinity
     tty: true
     stdin_open: true
     volumes:
       - /home/jack/dev/smithjack.net/SwiftRos2:/swiftros_ws
       - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/shm:/dev/shm
     environment:
       QT_X11_NO_MITSHM: 1
       DISPLAY: $DISPLAY
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
     cap_add:
       - SYS_NICE
     devices:
