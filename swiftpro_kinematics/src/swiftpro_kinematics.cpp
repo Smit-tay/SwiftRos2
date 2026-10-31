@@ -24,14 +24,11 @@
 // KINEMATIC MODEL — see kinematics.hpp for full documentation
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// The parallel linkage decouples the forearm world angle from 'left'.
-// Forearm world angle depends ONLY on 'right'.
-// Parameters calibrated from 16-point commanded sweep, RMS = 0.27mm.
-//
-// Firmware angle conventions (degrees, zero offsets):
-//   base : 90° = arm pointing along +X (forward). azimuth = base - 90°.
-//   left : upper arm angle above horizontal.
-//   right: forearm downward angle from horizontal. 0°=horizontal, +°=down.
+// Same model and limits as the firmware. Angle conventions (degrees):
+//   compute_fk/compute_ik: base 90° = straight ahead (firmware user frame).
+//   /joint_states:         base  0° = straight ahead (firmware @3).
+//   left : lower arm above horizontal.
+//   right: upper arm below horizontal.
 //
 // ComputeFK.srv / ComputeIK.srv currently use field names j1/j2/j3 — these
 // map base→j1, left→j2, right→j3 (the historical Joint1/2/3 order). When
@@ -94,8 +91,8 @@ public:
                     "FK params: L1=%.2f L2=%.2f SH_Z=%.2f DX=%.2f DZ=%.2f",
                     kin::L1, kin::L2, kin::SH_Z, kin::DX, kin::DZ);
         RCLCPP_INFO(get_logger(),
-                    "IK limits: Z_MIN=%.1f Z_MAX=%.1f J3_MAX=%.1f J2_MIN=%.1f",
-                    kin::Z_MIN, kin::Z_MAX, kin::J3_MAX, kin::J2_MIN);
+                    "IK limits: base %.1f to %.1f, left %.1f to %.1f, right from table",
+                    kin::BASE_MIN, kin::BASE_MAX, kin::LEFT_MIN, kin::LEFT_MAX);
     }
 
 private:
@@ -120,8 +117,9 @@ private:
             return;
         }
 
-        // Convert to firmware degrees for kin::fk.
-        const double base_deg  = base_rad  * RAD_TO_DEG;
+        // Convert to the degrees of kin::fk. /joint_states has base 0 straight
+        // ahead, kin::fk has it at 90.
+        const double base_deg  = base_rad  * RAD_TO_DEG + 90.0;
         const double left_deg  = left_rad  * RAD_TO_DEG;
         const double right_deg = right_rad * RAD_TO_DEG;
 

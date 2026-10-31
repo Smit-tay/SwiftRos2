@@ -2,14 +2,12 @@
 # test_swiftros2.sh — exercise every service and topic on the SwiftRos2
 # hardware node. Reports pass/fail per test with live coloured output.
 #
-# Changes vs v2:
-#   - Schema fix: SetWrist/SetServoAngle/SetPolar speed is int32, not float
-#   - SetPolar request includes 'relative' and 'wait' fields (default false)
-#   - motion_reset mid-flight test is SKIPPED (libswiftpro Bug 2 — STATE_ALARM)
-#   - Pre-flight failures (other than missing ros2) no longer hard-exit:
-#     they fail loudly but the run continues so we see the full picture
-#   - /swiftpro/connected check wrapped in timeout to avoid hang
-#   - Verified against schemas dumped 2026-06-11
+# speed is the firmware's F everywhere: 1 F = 80 deg/min of joint-space speed,
+# not mm/min. Base angles in requests: 90 = straight ahead.
+# Moves stay within about 30 deg of straight ahead.
+#
+# Schema notes: SetWrist/SetServoAngle/SetPolar speed is int32, not float;
+# SetPolar request includes 'relative' and 'wait' fields (default false).
 #
 # Usage:
 #   ros2 run swiftpro_hardware swiftpro_hardware       # in another terminal
@@ -264,11 +262,12 @@ for sid in 0 1 2 3; do
     fi
 done
 
-if call_service /swiftpro/get_digital swiftpro_resources/srv/GetDigital '{pin: 0}'; then
+# Pin 0 is USART0, refused; 37 (PC0) is free to read.
+if call_service /swiftpro/get_digital swiftpro_resources/srv/GetDigital '{pin: 37}'; then
     VAL=$(echo "$CALL_OUTPUT" | grep -oP 'value=\K-?\d+')
-    pass "get_digital pin=0 (value=$VAL)"
+    pass "get_digital pin=37 (value=$VAL)"
 else
-    fail "get_digital pin=0" "$CALL_OUTPUT"
+    fail "get_digital pin=37" "$CALL_OUTPUT"
 fi
 
 if call_service /swiftpro/get_analog swiftpro_resources/srv/GetAnalog '{pin: 0}'; then
@@ -287,10 +286,11 @@ else
     fail "set_mode 0" "$CALL_OUTPUT"
 fi
 
-if call_service /swiftpro/set_acceleration swiftpro_resources/srv/SetAcceleration '{acc: 50.0}'; then
-    pass "set_acceleration 50"
+# M204 is stored in EEPROM: 5 is the firmware default, leave it there.
+if call_service /swiftpro/set_acceleration swiftpro_resources/srv/SetAcceleration '{acc: 5.0}'; then
+    pass "set_acceleration 5"
 else
-    fail "set_acceleration 50" "$CALL_OUTPUT"
+    fail "set_acceleration 5" "$CALL_OUTPUT"
 fi
 
 # ── Group 4: Kinematics queries (no motion) ──────────────────────────────────
@@ -329,8 +329,8 @@ else
 fi
 
 if call_service /swiftpro/angles_to_coord swiftpro_resources/srv/AnglesToCoord \
-    '{base: 0.0, left: 90.0, right: 0.0}'; then
-    pass "angles_to_coord (0,90,0)"
+    '{base: 90.0, left: 90.0, right: 0.0}'; then
+    pass "angles_to_coord (90,90,0)"
     echo -e "        ${C_GREY}$(echo "$CALL_OUTPUT" | tail -5 | tr '\n' ' ')${C_RESET}"
 else
     fail "angles_to_coord" "$CALL_OUTPUT"
@@ -339,25 +339,19 @@ fi
 # ── Group 5: GPIO writes ─────────────────────────────────────────────────────
 section "Group 5 — GPIO"
 
+# Refusals only: nothing here drives a pin. Pin 36 is PC1, encoder I2C.
 if call_service /swiftpro/set_digital_direction swiftpro_resources/srv/SetDigitalDirection \
-    '{pin: 36, value: 1}'; then
-    pass "set_digital_direction pin=36 (output)"
+    '{pin: 36, value: 1}' "success=False.*error_code=21"; then
+    pass "set_digital_direction refused on firmware-owned pin"
 else
-    fail "set_digital_direction pin=36" "$CALL_OUTPUT"
+    fail "set_digital_direction refused on firmware-owned pin" "$CALL_OUTPUT"
 fi
 
 if call_service /swiftpro/set_digital_output swiftpro_resources/srv/SetDigitalOutput \
-    '{pin: 36, value: 1}'; then
-    pass "set_digital_output pin=36 HIGH"
+    '{pin: 36, value: 1}' "success=False.*error_code=21"; then
+    pass "set_digital_output refused on firmware-owned pin"
 else
-    fail "set_digital_output pin=36 HIGH" "$CALL_OUTPUT"
-fi
-sleep 0.5
-if call_service /swiftpro/set_digital_output swiftpro_resources/srv/SetDigitalOutput \
-    '{pin: 36, value: 0}'; then
-    pass "set_digital_output pin=36 LOW"
-else
-    fail "set_digital_output pin=36 LOW" "$CALL_OUTPUT"
+    fail "set_digital_output refused on firmware-owned pin" "$CALL_OUTPUT"
 fi
 
 # ── Group 6: SendRaw escape hatch ────────────────────────────────────────────
@@ -375,7 +369,7 @@ section "Group 7 — Motion (arm will move!)"
 
 info "Moving to home (200, 0, 150)..."
 if call_service /swiftpro/move_to swiftpro_resources/srv/MoveTo \
-    '{x: 200.0, y: 0.0, z: 150.0, speed: 2000.0}'; then
+    '{x: 200.0, y: 0.0, z: 150.0, speed: 20.0}'; then
     pass "move_to home"
     wait_for 2 "settling"
 else
@@ -385,7 +379,7 @@ fi
 # SetWrist.speed is int32 — must NOT have a decimal point
 info "Setting wrist to 45°..."
 if call_service /swiftpro/set_wrist swiftpro_resources/srv/SetWrist \
-    '{angle: 45.0, speed: 2000}'; then
+    '{angle: 45.0, speed: 20}'; then
     pass "set_wrist 45°"
     sleep 1
 else
@@ -394,7 +388,7 @@ fi
 
 info "Setting wrist back to 90°..."
 if call_service /swiftpro/set_wrist swiftpro_resources/srv/SetWrist \
-    '{angle: 90.0, speed: 2000}'; then
+    '{angle: 90.0, speed: 20}'; then
     pass "set_wrist 90°"
     sleep 1
 else
@@ -403,7 +397,7 @@ fi
 
 # SetPolar.speed is int32; relative and wait default to false but supplied
 # explicitly for clarity
-info "Polar move: stretch=200 rot=30° height=150..."
+info "Polar move: stretch=200 rot=70° height=150..."
 if call_service /swiftpro/set_polar swiftpro_resources/srv/SetPolar \
     '{stretch: 200.0, rotation: 30.0, height: 150.0, speed: 2000, relative: false, wait: false}'; then
     pass "set_polar"
@@ -413,9 +407,9 @@ else
 fi
 
 # SetServoAngles.speed is float32 (special case — different from SetServoAngle)
-info "Moving via joint angles (set_servo_angles): base=0 left=80 right=20..."
+info "Moving via joint angles (set_servo_angles): base=90 left=80 right=20..."
 if call_service /swiftpro/set_servo_angles swiftpro_resources/srv/SetServoAngles \
-    '{j1: 0.0, j2: 80.0, j3: 20.0, speed: 2000.0}'; then
+    '{j1: 90.0, j2: 80.0, j3: 20.0, speed: 20.0}'; then
     pass "set_servo_angles"
     wait_for 2 "moving"
 else
@@ -423,9 +417,9 @@ else
 fi
 
 # SetServoAngle.speed is int32
-info "Single-servo move: base servo to 30°..."
+info "Single-servo move: base servo to 70°..."
 if call_service /swiftpro/set_servo_angle swiftpro_resources/srv/SetServoAngle \
-    '{servo_id: 0, angle: 30.0, speed: 2000}'; then
+    '{servo_id: 0, angle: 70.0, speed: 20}'; then
     pass "set_servo_angle servo_id=0"
     wait_for 2 "moving"
 else
@@ -434,7 +428,7 @@ fi
 
 info "Starting a long move (will pause mid-flight)..."
 ros2 service call /swiftpro/move_to swiftpro_resources/srv/MoveTo \
-    '{x: 100.0, y: 200.0, z: 150.0, speed: 500.0}' >/dev/null 2>&1 &
+    '{x: 200.0, y: 100.0, z: 150.0, speed: 5.0}' >/dev/null 2>&1 &
 LONG_MOVE_PID=$!
 sleep 1
 
@@ -454,15 +448,60 @@ fi
 wait $LONG_MOVE_PID 2>/dev/null || true
 sleep 1
 
-# motion_reset mid-flight triggers libswiftpro Bug 2:
-#   firmware mc_reset() during motion → STATE_ALARM
-#   → all subsequent g-code commands time out
-# Until Bug 2 is fixed, this test would brick the arm for the rest of the
-# run. Skipping until either:
-#   (a) firmware patch lands (preferred — avoid the alarm)
-#   (b) recovery path implemented in libswiftpro / hardware node
-skip "motion_reset (mid-flight)" \
-     "libswiftpro Bug 2: mc_reset() during motion → STATE_ALARM, subsequent commands time out"
+info "Starting a long move (will stop mid-flight)..."
+ros2 service call /swiftpro/move_to swiftpro_resources/srv/MoveTo \
+    '{x: 200.0, y: -100.0, z: 150.0, speed: 5.0}' >/tmp/stopped_move.log 2>&1 &
+LONG_MOVE_PID=$!
+sleep 2
+
+if call_service /swiftpro/motion_reset swiftpro_resources/srv/MotionReset '{}'; then
+    pass "motion_reset (mid-flight)"
+else
+    fail "motion_reset (mid-flight)" "$CALL_OUTPUT"
+fi
+
+wait $LONG_MOVE_PID 2>/dev/null || true
+if grep -q "error_code=25" /tmp/stopped_move.log; then
+    pass "stopped move reports E25"
+else
+    fail "stopped move reports E25" "$(cat /tmp/stopped_move.log)"
+fi
+
+if call_service /swiftpro/move_to swiftpro_resources/srv/MoveTo \
+    '{x: 200.0, y: 0.0, z: 150.0, speed: 20.0}'; then
+    pass "move_to after motion_reset"
+else
+    fail "move_to after motion_reset" "$CALL_OUTPUT"
+fi
+
+# ── Refused moves: no motion, a real error_code ──────────────────────────────
+if call_service /swiftpro/move_to swiftpro_resources/srv/MoveTo \
+    '{x: 500.0, y: 0.0, z: 150.0, speed: 20.0}' "success=False.*error_code=22"; then
+    pass "unreachable move_to reports E22"
+else
+    fail "unreachable move_to reports E22" "$CALL_OUTPUT"
+fi
+
+if call_service /swiftpro/move_to swiftpro_resources/srv/MoveTo \
+    '{x: 200.0, y: 0.0, z: 1.0, speed: 20.0}' "success=False.*error_code=-9"; then
+    pass "move_to below z_min refused"
+else
+    fail "move_to below z_min refused" "$CALL_OUTPUT"
+fi
+
+# ── Kinematics node, if it is running: its FK against the firmware's position ─
+if ros2 node list 2>/dev/null | grep -q swiftpro_kinematics; then
+    sleep 1
+    FW_X=$(timeout 3 ros2 topic echo /swiftpro/position --once 2>/dev/null | grep -oP '^x:\s*\K\S+')
+    FK_X=$(timeout 3 ros2 topic echo /swiftpro/end_effector_position --once 2>/dev/null | grep -oP '^\s*x:\s*\K\S+')
+    if awk -v a="${FW_X:-0}" -v b="${FK_X:-1000}" 'BEGIN { d = a - b; exit !(d < 1 && d > -1) }'; then
+        pass "end_effector_position matches position (x: $FK_X, $FW_X)"
+    else
+        fail "end_effector_position matches position" "x: fk='${FK_X:-}' firmware='${FW_X:-}'"
+    fi
+else
+    skip "end_effector_position" "swiftpro_kinematics not running"
+fi
 
 # ── Group 8: Action server ───────────────────────────────────────────────────
 section "Group 8 — MoveArm action"
@@ -471,7 +510,7 @@ info "Sending action goal (will print feedback to stdout)..."
 echo -e "${C_GREY}── feedback ───────────────────────────────────────────────────────────${C_RESET}"
 if timeout 30 ros2 action send_goal /swiftpro/move_arm \
     swiftpro_resources/action/MoveArm \
-    '{x: 250.0, y: 100.0, z: 100.0, speed: 1500.0}' \
+    '{x: 250.0, y: 100.0, z: 100.0, speed: 20.0}' \
     --feedback 2>&1 | tee /tmp/action_output.log; then
     if grep -q "SUCCEEDED" /tmp/action_output.log; then
         pass "move_arm action SUCCEEDED"
@@ -483,12 +522,22 @@ else
 fi
 echo -e "${C_GREY}───────────────────────────────────────────────────────────────────────${C_RESET}"
 
+info "Sending an unreachable goal: must not report success..."
+timeout 30 ros2 action send_goal /swiftpro/move_arm \
+    swiftpro_resources/action/MoveArm \
+    '{x: 500.0, y: 0.0, z: 150.0, speed: 20.0}' >/tmp/action_refused.log 2>&1 || true
+if grep -q "ABORTED" /tmp/action_refused.log && grep -q "error_code: 22" /tmp/action_refused.log; then
+    pass "unreachable move_arm goal ABORTED with E22"
+else
+    fail "unreachable move_arm goal" "$(cat /tmp/action_refused.log)"
+fi
+
 # ── Final: Reset to home ─────────────────────────────────────────────────────
 section "Final — Reset"
 
 info "Resetting to home position..."
 if call_service /swiftpro/reset swiftpro_resources/srv/Reset \
-    '{x: 200.0, y: 0.0, z: 150.0, speed: 2000.0}'; then
+    '{x: 200.0, y: 0.0, z: 150.0, speed: 20.0}'; then
     pass "reset to home"
 else
     fail "reset to home" "$CALL_OUTPUT"

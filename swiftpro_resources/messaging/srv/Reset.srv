@@ -1,5 +1,5 @@
 # Reset the arm — lock motors, release end effectors, move to (x, y, z).
-# Defaults matching libswiftpro: x=200, y=0, z=150, speed=50 mm/min.
+# Defaults matching libswiftpro: x=200, y=0, z=150, speed=F50.
 float32 x
 float32 y
 float32 z

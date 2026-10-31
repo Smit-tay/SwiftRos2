@@ -9,8 +9,9 @@
 // and power state, an action server for long Cartesian moves with feedback
 // and cancellation, and services for everything libswiftpro exposes.
 //
-//   Publishers (7):
-//     /joint_states              sensor_msgs/JointState  base, left, right
+//   Publishers (8):
+//     /joint_states              sensor_msgs/JointState  base, left, right (radians)
+//                                base as in firmware @3: 0 = straight ahead
 //     /swiftpro/position         geometry_msgs/Point     (x, y, z) mm
 //     /swiftpro/pump_status      std_msgs/Int8           0=off, 1=working, 2=holding
 //     /swiftpro/gripper_status   std_msgs/Int8           0=released, 1=working, 2=holding
@@ -21,9 +22,17 @@
 //
 //   Action (1):
 //     /swiftpro/move_arm         swiftpro_resources/action/MoveArm
-//       Goal x,y,z (mm), speed (mm/min). Feedback at 10 Hz. Cancel = motion_reset.
+//       Goal x,y,z (mm), speed (F). Feedback at 10 Hz. Cancel = motion_reset.
+//       The result is the firmware's reply to the move.
 //
 //   Services: see definitions in swiftpro_resources/messaging/srv/.
+//
+// speed is the firmware's F everywhere: 1 F = 80 deg/min of joint-space speed
+// (F50 = 66.7 deg/s), not mm/min.
+//
+// error_code: 0 = success; 20-27 = firmware E20-E27 (libswiftpro docs/protocol.md);
+// negative = host side, see the ERR_* constants. /swiftpro/send_raw and joint
+// moves are not checked against the z_min parameter.
 //
 // Threading: MultiThreadedExecutor with one reentrant callback group for all
 // services and the action server, so libswiftpro _sync calls can run in
@@ -32,6 +41,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -84,6 +95,32 @@ static const std::vector<std::string> JOINT_NAMES = { "base", "left", "right" };
 static constexpr double DEG_TO_RAD        = M_PI / 180.0;
 static constexpr int    CONNECT_SETTLE_MS = 2000;   // DTR reset boot delay
 
+// Negative error_code values. The firmware's own errors keep their numbers.
+static constexpr int32_t ERR_NOT_CONNECTED  = -1;
+static constexpr int32_t ERR_OTHER          = -2;
+static constexpr int32_t ERR_CANCELLED      = -3;
+static constexpr int32_t ERR_TIMEOUT        = -4;
+static constexpr int32_t ERR_FIRMWARE_RESET = -5;
+static constexpr int32_t ERR_STOPPED        = -6;
+static constexpr int32_t ERR_QUEUE_FULL     = -7;
+static constexpr int32_t ERR_IO             = -8;
+static constexpr int32_t ERR_BELOW_Z_MIN    = -9;
+static constexpr int32_t ERR_SHUTDOWN       = -10;
+
+// libswiftpro error text -> error_code. Firmware errors start with E<number>.
+static int32_t error_code_of(const std::string& error)
+{
+    int code = 0;
+    if (std::sscanf(error.c_str(), "E%d", &code) == 1) { return code; }
+    if (error == "NOT_CONNECTED" || error == "DISCONNECTED") { return ERR_NOT_CONNECTED; }
+    if (error == "TIMEOUT")        { return ERR_TIMEOUT; }
+    if (error == "FIRMWARE_RESET") { return ERR_FIRMWARE_RESET; }
+    if (error == "STOPPED")        { return ERR_STOPPED; }
+    if (error == "QUEUE_FULL")     { return ERR_QUEUE_FULL; }
+    if (error == "IO_ERROR")       { return ERR_IO; }
+    return ERR_OTHER;
+}
+
 // Pull libswiftpro result aliases into the TU scope.
 using swiftpro::VoidResult;
 
@@ -104,6 +141,7 @@ public:
         position_report_interval_ = declare_parameter<double>     ("position_report_interval", 0.1);
         status_poll_rate_hz_      = declare_parameter<double>     ("status_poll_rate",         1.0);
         watchdog_period_s_        = declare_parameter<double>     ("watchdog_period",          5.0);
+        z_min_mm_                 = declare_parameter<double>     ("z_min",                    5.0);
 
         // ── QoS profiles ──────────────────────────────────────────────────
         const rclcpp::QoS latched_qos =
@@ -198,9 +236,9 @@ public:
             cb_group_);
 
         RCLCPP_INFO(get_logger(),
-                    "swiftpro_hardware ready — port=%s baud=%d status=%.1fHz watchdog=%.1fs",
+                    "swiftpro_hardware ready — port=%s baud=%d status=%.1fHz watchdog=%.1fs z_min=%.1fmm",
                     port_.c_str(), baudrate_,
-                    status_poll_rate_hz_, watchdog_period_s_);
+                    status_poll_rate_hz_, watchdog_period_s_, z_min_mm_);
     }
 
     ~SwiftProHardware() override
@@ -262,19 +300,13 @@ private:
         swift_.on_power([this](bool on) {
             on_power_event(on);
         });
+        swift_.on_lost_steps([this](int joint, float error_deg) {
+            RCLCPP_ERROR(get_logger(),
+                         "lost steps on joint %d: %.2f deg off — arm stopped, moves in flight fail",
+                         joint, error_deg);
+        });
 
-        // Enable @3 periodic position/joint reports.
-        if (auto r = swift_.set_report_interval_sync(
-                static_cast<float>(position_report_interval_));
-            !r)
-        {
-            RCLCPP_WARN(get_logger(), "set_report_interval: %s", r.error().c_str());
-        }
-
-        // Enable @9 motion-complete events.
-        if (auto r = swift_.set_motion_report_sync(true); !r) {
-            RCLCPP_WARN(get_logger(), "set_motion_report: %s", r.error().c_str());
-        }
+        enable_reports();
 
         // Device info (best-effort).
         if (auto r = swift_.get_device_info_sync(); r) {
@@ -301,15 +333,49 @@ private:
         RCLCPP_INFO(get_logger(), "connect: ready on %s", port_.c_str());
     }
 
+    // Reports do not survive a firmware reboot.
+    void enable_reports()
+    {
+        last_report_ns_.store(now_ns());
+
+        // Enable @3 periodic position/joint reports.
+        if (auto r = swift_.set_report_interval_sync(
+                static_cast<float>(position_report_interval_));
+            !r)
+        {
+            RCLCPP_WARN(get_logger(), "set_report_interval: %s", r.error().c_str());
+        }
+
+        // Enable @9 motion-complete events.
+        if (auto r = swift_.set_motion_report_sync(true); !r) {
+            RCLCPP_WARN(get_logger(), "set_motion_report: %s", r.error().c_str());
+        }
+    }
+
+    static int64_t now_ns()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
     void watchdog()
     {
+        // The callback group is reentrant, and connect() can outlast the period.
+        if (watchdog_busy_.exchange(true)) { return; }
+
         const bool connected = swift_.is_connected();
         publish_connected(connected);
 
         if (!connected) {
             RCLCPP_WARN(get_logger(), "watchdog: arm disconnected — reconnecting");
             connect();
+        } else if (now_ns() - last_report_ns_.load() > 3.0e9 * position_report_interval_) {
+            // Connected but silent: the board rebooted without the port closing.
+            RCLCPP_WARN(get_logger(), "watchdog: no position reports — enabling them again");
+            enable_reports();
         }
+
+        watchdog_busy_.store(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -317,6 +383,8 @@ private:
     // ─────────────────────────────────────────────────────────────────────
     void on_position_event(float x, float y, float z)
     {
+        last_report_ns_.store(now_ns());
+
         // Cache for action feedback.
         {
             std::lock_guard<std::mutex> lock(position_mutex_);
@@ -340,8 +408,6 @@ private:
     void on_motion_complete_event()
     {
         motion_complete_pub_->publish(std_msgs::msg::Empty());
-        motion_pending_.store(false);
-        motion_cv_.notify_all();
     }
 
     void on_limit_switch_event(bool state)
@@ -423,20 +489,38 @@ private:
         auto       feedback = std::make_shared<MoveArm::Feedback>();
         auto       result   = std::make_shared<MoveArm::Result>();
 
-        // Arm the motion-complete latch and fire the move asynchronously.
-        motion_pending_.store(true);
+        const auto finish = [&](int32_t code, const std::string& message) {
+            result->success    = (code == 0);
+            result->error_code = code;
+            result->message    = message;
+            RCLCPP_INFO(get_logger(), "move_arm: %s", message.c_str());
+            if (code == 0)                  { gh->succeed(result); }
+            else if (code == ERR_CANCELLED) { gh->canceled(result); }
+            else                            { gh->abort(result); }
+            goal_active_.store(false);
+        };
+
+        if (below_z_min(goal->z)) {
+            finish(ERR_BELOW_Z_MIN, "Below z_min");
+            return;
+        }
+
+        // The move's reply is the result: it comes when the move has finished,
+        // or with the reason it did not run or was stopped. @9 cannot tell these
+        // apart, it also fires after a stop.
+        struct Outcome { bool done = false; VoidResult result = VoidResult::ok(); };
+        auto outcome = std::make_shared<Outcome>();
         swift_.set_position(goal->x, goal->y, goal->z, goal->speed, false,
-                            [this](VoidResult r) {
-                                if (!r) {
-                                    RCLCPP_WARN(get_logger(),
-                                                "move_arm: set_position ack: %s",
-                                                r.error().c_str());
-                                    motion_pending_.store(false);
-                                    motion_cv_.notify_all();
+                            [this, outcome](VoidResult r) {
+                                {
+                                    std::lock_guard<std::mutex> lock(motion_mutex_);
+                                    outcome->result = std::move(r);
+                                    outcome->done   = true;
                                 }
+                                motion_cv_.notify_all();
                             });
 
-        // Wait for @9 motion-complete event, publishing feedback at 10 Hz.
+        // Wait for the reply, publishing feedback at 10 Hz.
         constexpr auto timeout   = std::chrono::seconds(60);
         constexpr auto poll_step = std::chrono::milliseconds(100);
         const auto     deadline  = std::chrono::steady_clock::now() + timeout;
@@ -444,13 +528,7 @@ private:
         while (rclcpp::ok()) {
             if (gh->is_canceling()) {
                 swift_.motion_reset_sync();
-                motion_pending_.store(false);
-                result->success    = false;
-                result->error_code = -3;
-                result->message    = "Cancelled";
-                gh->canceled(result);
-                RCLCPP_INFO(get_logger(), "move_arm: cancelled");
-                goal_active_.store(false);
+                finish(ERR_CANCELLED, "Cancelled");
                 return;
             }
 
@@ -465,35 +543,26 @@ private:
                 }
             }
 
-            // Wait for motion-complete or timeout slice.
+            // Wait for the reply or timeout slice.
             {
                 std::unique_lock<std::mutex> lock(motion_mutex_);
-                if (motion_cv_.wait_for(lock, poll_step,
-                                        [this] { return !motion_pending_.load(); }))
-                {
-                    break;
+                if (motion_cv_.wait_for(lock, poll_step, [&] { return outcome->done; })) {
+                    const VoidResult r = outcome->result;
+                    lock.unlock();
+                    if (r) { finish(0, "OK"); }
+                    else   { finish(error_code_of(r.error()), r.error()); }
+                    return;
                 }
             }
 
             if (std::chrono::steady_clock::now() >= deadline) {
                 swift_.motion_reset_sync();
-                motion_pending_.store(false);
-                result->success    = false;
-                result->error_code = -4;
-                result->message    = "Timeout";
-                gh->abort(result);
-                RCLCPP_WARN(get_logger(), "move_arm: timeout");
-                goal_active_.store(false);
+                finish(ERR_TIMEOUT, "Timeout");
                 return;
             }
         }
 
-        result->success    = true;
-        result->error_code = 0;
-        result->message    = "OK";
-        gh->succeed(result);
-        RCLCPP_INFO(get_logger(), "move_arm: succeeded");
-        goal_active_.store(false);
+        finish(ERR_SHUTDOWN, "Shutting down");
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -504,6 +573,10 @@ private:
               std::shared_ptr<swiftpro_resources::srv::MoveTo::Response> res)
     {
         if (!ensure_connected(res->success, res->error_code, res->message)) { return; }
+        if (below_z_min(req->z)) {
+            res->success = false; res->error_code = ERR_BELOW_Z_MIN; res->message = "Below z_min";
+            return;
+        }
         const auto r = swift_.set_position_sync(req->x, req->y, req->z, req->speed);
         fill_result(r, res->success, res->error_code, res->message);
     }
@@ -513,6 +586,10 @@ private:
               std::shared_ptr<swiftpro_resources::srv::SetPolar::Response> res)
     {
         if (!ensure_connected(res->success, res->error_code)) { return; }
+        if (below_z_min(req->height)) {
+            res->success = false; res->error_code = ERR_BELOW_Z_MIN;
+            return;
+        }
         const auto r = swift_.set_polar_sync(req->stretch, req->rotation, req->height, req->speed);
         fill_result(r, res->success, res->error_code);
     }
@@ -579,6 +656,10 @@ private:
               std::shared_ptr<swiftpro_resources::srv::Reset::Response> res)
     {
         if (!ensure_connected(res->success, res->error_code, res->message)) { return; }
+        if (below_z_min(req->z)) {
+            res->success = false; res->error_code = ERR_BELOW_Z_MIN; res->message = "Below z_min";
+            return;
+        }
         const auto r = swift_.reset_sync(req->x, req->y, req->z, req->speed);
         fill_result(r, res->success, res->error_code, res->message);
     }
@@ -738,7 +819,7 @@ private:
         const auto r = swift_.is_reachable_sync(req->x, req->y, req->z);
         res->success   = static_cast<bool>(r);
         res->reachable = (r && r.value() == 1);
-        res->error_code = r ? 0 : -2;
+        res->error_code = r ? 0 : error_code_of(r.error());
         if (!r) {
             RCLCPP_WARN(get_logger(), "is_reachable: %s", r.error().c_str());
         }
@@ -758,7 +839,7 @@ private:
             res->right = r.value()[2];
             res->success = true; res->error_code = 0;
         } else {
-            res->success = false; res->error_code = -2;
+            res->success = false; res->error_code = r ? ERR_OTHER : error_code_of(r.error());
             if (!r) {
                 RCLCPP_WARN(get_logger(), "coord_to_angles: %s", r.error().c_str());
             }
@@ -779,7 +860,7 @@ private:
             res->z = r.value()[2];
             res->success = true; res->error_code = 0;
         } else {
-            res->success = false; res->error_code = -2;
+            res->success = false; res->error_code = r ? ERR_OTHER : error_code_of(r.error());
             if (!r) {
                 RCLCPP_WARN(get_logger(), "angles_to_coord: %s", r.error().c_str());
             }
@@ -800,31 +881,37 @@ private:
         // the public API. Echo the command status as the response payload for
         // shell consumers, and surface the error string on failure.
         res->success    = static_cast<bool>(r);
-        res->error_code = r ? 0 : -2;
+        res->error_code = r ? 0 : error_code_of(r.error());
         res->response   = r ? "ok" : r.error();
     }
 
     // ─────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
+    // The floor applies to the requested target. NaN is below it too.
+    bool below_z_min(float z) const
+    {
+        return !(z >= z_min_mm_);
+    }
+
     bool ensure_connected(bool& success_out, int32_t& err_out)
     {
         if (swift_.is_connected()) { return true; }
-        success_out = false; err_out = -1;
+        success_out = false; err_out = ERR_NOT_CONNECTED;
         return false;
     }
 
     bool ensure_connected(bool& success_out, int32_t& err_out, std::string& msg_out)
     {
         if (swift_.is_connected()) { return true; }
-        success_out = false; err_out = -1; msg_out = "Not connected";
+        success_out = false; err_out = ERR_NOT_CONNECTED; msg_out = "Not connected";
         return false;
     }
 
     void fill_result(const VoidResult& r, bool& success_out, int32_t& err_out)
     {
         success_out = static_cast<bool>(r);
-        err_out     = r ? 0 : -2;
+        err_out     = r ? 0 : error_code_of(r.error());
         if (!r) {
             RCLCPP_WARN(get_logger(), "command failed: %s", r.error().c_str());
         }
@@ -834,7 +921,7 @@ private:
                      std::string& msg_out)
     {
         success_out = static_cast<bool>(r);
-        err_out     = r ? 0 : -2;
+        err_out     = r ? 0 : error_code_of(r.error());
         msg_out     = r ? "OK" : r.error();
         if (!r) {
             RCLCPP_WARN(get_logger(), "command failed: %s", r.error().c_str());
@@ -851,9 +938,14 @@ private:
     double      position_report_interval_{0.1};
     double      status_poll_rate_hz_{1.0};
     double      watchdog_period_s_{5.0};
+    double      z_min_mm_{5.0};
 
     // Latched-publish state
     bool last_connected_published_{false};
+
+    // Watchdog state
+    std::atomic<bool>    watchdog_busy_{false};
+    std::atomic<int64_t> last_report_ns_{0};
 
     // Cached position for action feedback (written on receiver thread)
     std::mutex position_mutex_;
@@ -862,10 +954,9 @@ private:
     float      cached_z_{0.0f};
     bool       position_valid_{false};
 
-    // Motion-complete latch
+    // Signals the reply to a MoveArm move
     std::mutex              motion_mutex_;
     std::condition_variable motion_cv_;
-    std::atomic<bool>       motion_pending_{false};
 
     // Action goal arbitration
     std::atomic<bool> goal_active_{false};

@@ -4,7 +4,7 @@ A complete ROS2 driver stack for the UFactory UArm Swift Pro robotic arm.
 
 **Author:** Jack Sidman Smith  
 **ROS2 Distro:** Jazzy Jalisco  
-**Platform:** Ubuntu 24.04 (containerised), Fedora 43 (host)  
+**Platform:** Ubuntu 24.04 (containerised), Fedora 44 (host)  
 **License:** MIT
 
 ---
@@ -27,19 +27,19 @@ host network. No shared filesystem or shared container is required.
 Standard ROS2 Jazzy packages — installed in the container images:
 `rclcpp`, `rclcpp_action`, `sensor_msgs`, `geometry_msgs`, `std_msgs`
 
-### libuarm (vendored, non-ROS)
-The hardware node depends on [libuarm](https://github.com/Smit-tay/libuarm) — a
+### libswiftpro (vendored, non-ROS)
+The hardware node depends on [libswiftpro](https://github.com/Smit-tay/libswiftpro) — a
 standalone C++ library for controlling the UArm Swift Pro over USB serial.
 
-libuarm is **not** a ROS2 package and is not installed system-wide. It is vendored
-under `third_party/libuarm/` and built as part of the SwiftRos2 workspace via
-`add_subdirectory()`.
+libswiftpro is **not** a ROS2 package and is not installed system-wide. It is a plain
+git clone (not a submodule) under `third_party/libswiftpro/`, built as part of the
+SwiftRos2 workspace via `add_subdirectory()`.
 
 **One-time setup:**
 ```bash
 mkdir -p third_party
 cd third_party
-git clone https://github.com/Smit-tay/libuarm.git
+git clone https://github.com/Smit-tay/libswiftpro.git
 ```
 
 `third_party/` is excluded from the SwiftRos2 git repository (`.gitignore`).
@@ -58,16 +58,16 @@ and exposes arm control via ROS2 services.
 
 | Topic | Type | Description |
 |---|---|---|
-| `/joint_states` | `sensor_msgs/JointState` | Joint1, Joint2, Joint3 servo angles in radians |
+| `/joint_states` | `sensor_msgs/JointState` | `base`, `left`, `right` in radians; `base` 0 = straight ahead |
 | `/swiftpro/position` | `geometry_msgs/Point` | Raw XYZ position from arm firmware |
-| `/swiftpro/pump_status` | `std_msgs/Bool` | Vacuum pump on/off state |
+| `/swiftpro/pump_status` | `std_msgs/Int8` | Pump: 0 off, 1 working, 2 holding |
 | `/swiftpro/connected` | `std_msgs/Bool` | Arm connection state, updated every 5s |
 
 **Services:**
 
 | Service | Type | Description |
 |---|---|---|
-| `/swiftpro/move_to` | `swiftpro_resources/MoveTo` | Move to XYZ position at given speed |
+| `/swiftpro/move_to` | `swiftpro_resources/MoveTo` | Move to XYZ position at given speed (F, see below) |
 | `/swiftpro/set_pump` | `swiftpro_resources/SetPump` | Enable or disable vacuum pump |
 | `/swiftpro/set_gripper` | `swiftpro_resources/SetGripper` | Open or close gripper |
 | `/swiftpro/reset` | `swiftpro_resources/Reset` | Move arm to safe home position |
@@ -79,10 +79,22 @@ and exposes arm control via ROS2 services.
 | `port` | `/dev/ttyACM0` | USB serial port |
 | `baudrate` | `115200` | Serial baud rate |
 | `position_report_interval` | `0.1` | Arm firmware position report interval (seconds) |
-| `joint_state_publish_rate` | `10.0` | JointState publish rate (Hz) |
+| `status_poll_rate` | `1.0` | Pump and gripper status poll rate (Hz) |
+| `watchdog_period` | `5.0` | Connection and report check period (seconds) |
+| `z_min` | `5.0` | Floor (mm) for the target of `move_to`, `move_arm`, `set_polar`, `reset` |
 
-**Note:** Only Joint1, Joint2, and Joint3 are published — the three physical servos.
-Joint4 through Joint8 are mechanically constrained by the parallel linkage and
+**Speed:** every `speed` is the firmware's F, not mm/min: 1 F = 80 deg/min of
+joint-space speed (F50 = 66.7 deg/s). F100 is the firmware's boot default and is fast.
+
+**`error_code`:** 0 success; 20–27 firmware `E20`–`E27` (22 unreachable, 25 stopped);
+-1 not connected, -2 other, -3 cancelled, -4 timeout, -5 firmware reset, -6 stopped
+before being sent, -7 queue full, -8 serial I/O, -9 below `z_min`, -10 shutting down.
+
+**Safety limits of `z_min`:** joint moves and `send_raw` are not checked against it.
+Each open of the port resets the board, which shifts the arm slightly.
+
+**Note:** Only `base`, `left`, and `right` are published — the three physical servos.
+The other joints are mechanically constrained by the parallel linkage and
 computed automatically by `robot_state_publisher` via `<mimic>` tags in the URDF.
 
 ---
@@ -102,11 +114,11 @@ Cartesian position topic for consumers that do not want to query TF.
 |---|---|---|
 | `/swiftpro/end_effector_position` | `geometry_msgs/PointStamped` | Analytical FK result in base frame |
 
-**FK approach:** Geometric forward kinematics. Shoulder (Joint2) and elbow (Joint3)
+**FK approach:** Geometric forward kinematics. Shoulder (left) and elbow (right)
 both rotate around Y. End effector position is computed by projecting upper arm and
 forearm lengths through the accumulated joint angles, then rotating around Z by the
-base angle (Joint1). The parallel linkage keeps the end effector level and does not
-affect tip position, so FK is correct from Joint1/2/3 alone.
+base angle (base). The parallel linkage keeps the end effector level and does not
+affect tip position, so FK is correct from base/left/right alone.
 
 ---
 
@@ -129,32 +141,32 @@ Not a node — a ROS2 package containing shared resources:
 The UArm Swift Pro uses two four-bar parallel linkages which URDF cannot represent
 as closed kinematic chains (URDF is a tree structure). The solution is `<mimic>`
 joints. `robot_state_publisher` applies these constraints automatically when given
-Joint1/2/3 from the hardware node.
+base/left/right from the hardware node.
 
 **Physical verification of constraints (observed on hardware):**
 
-- Moving the shoulder (Joint2) only: forearm links stay parallel ✓
-- Moving the elbow (Joint3) only: upper arm links stay parallel ✓
+- Moving the shoulder (left) only: forearm links stay parallel ✓
+- Moving the elbow (right) only: upper arm links stay parallel ✓
 
 **Mimic relationships:**
 
 | Joint | Mimics | Ratio | Role |
 |---|---|---|---|
-| Joint4 | Joint3 | +1.0 | Triangular connector — transfers elbow rotation to wrist chain |
-| Joint5 | Joint2 | -1.0 | Upper arm rear rod — closes upper arm parallelogram loop |
-| Joint6 | Joint2 | +1.0 | Wrist rear upper rod — follows shoulder |
-| Joint7 | Joint3 | +1.0 | Wrist rear lower rod — transfers elbow to wrist |
-| Joint8 | Joint3 | -1.0 | End effector mount — cancels elbow rotation, keeps gripper level |
+| link4_mimic | right | +1.0 | Triangular connector — transfers elbow rotation to wrist chain |
+| link5_mimic | left | -1.0 | Upper arm rear rod — closes upper arm parallelogram loop |
+| link6_mimic | left | +1.0 | Wrist rear upper rod — follows shoulder |
+| link7_mimic | right | +1.0 | Wrist rear lower rod — transfers elbow to wrist |
+| link8_mimic | right | -1.0 | End effector mount — cancels elbow rotation, keeps gripper level |
 | Joint9 | fixed  | —    | Gripper jaw — not servo-driven in base configuration |
 
 **Node graph for visualisation:**
 
 ```
 swiftpro_hardware
-    publishes → /joint_states  {Joint1, Joint2, Joint3}
+    publishes → /joint_states  {base, left, right}
                       ↓
          robot_state_publisher
-         (reads URDF, applies <mimic> constraints for Joint4-8)
+         (reads URDF, applies <mimic> constraints for link4-8 mimics)
               publishes → /tf
               publishes → /robot_description
                       ↓
@@ -226,7 +238,7 @@ insecure = true
 
 ```
 SwiftRos2/
-├── Dockerfile                    # Development image
+├── Dockerfile.dev                # Development image
 ├── Dockerfile.runtime            # Lean runtime image for worker deployment
 ├── docker-compose.dev.yml        # Dev container configuration (NUC)
 ├── docker-compose.runtime.yml    # Runtime container configuration (worker)
@@ -234,7 +246,7 @@ SwiftRos2/
 ├── README.md                     # This file
 ├── DEPLOYMENT.md                 # Step-by-step deployment guide
 ├── third_party/                  # Vendored non-ROS dependencies (not in git)
-│   └── libuarm/                  # UArm Swift Pro C++ library
+│   └── libswiftpro/              # UArm Swift Pro C++ library (git clone)
 ├── swiftpro_hardware/
 │   ├── CMakeLists.txt
 │   ├── package.xml
@@ -271,17 +283,17 @@ SwiftRos2/
 ### One-time setup
 
 ```bash
-# On the NUC — clone libuarm into third_party/
+# On the NUC — clone libswiftpro into third_party/
 cd /home/jack/dev/smithjack.net/SwiftRos2
 mkdir -p third_party && cd third_party
-git clone https://github.com/Smit-tay/libuarm.git
+git clone https://github.com/Smit-tay/libswiftpro.git
 
 # Build the development image
 cd ..
-podman build --format docker -f Dockerfile -t swiftros2_dev .
+podman build --format docker -f Dockerfile.dev -t swiftros2_dev .
 
 # Start the development container
-podman-compose -f docker-compose.dev.yml up -d
+docker-compose -f docker-compose.dev.yml up -d
 
 # On the worker — ensure registry is running
 systemctl status registry
@@ -324,7 +336,7 @@ Full image rebuild (NF_08) only when system-level dependencies change.
 ```bash
 # Start via compose (after NF_06 + NF_07, or manually)
 cd /opt/swiftpro
-podman-compose -f docker-compose.runtime.yml up -d
+docker-compose -f docker-compose.runtime.yml up -d
 
 # Check it is running
 podman ps | grep swiftpro_hardware
@@ -345,19 +357,14 @@ podman logs swiftpro_hardware
   runtime compose on the worker retains them — the hardware node benefits from
   real-time scheduling priority.
 
-- **`move_to` returns `error_code: -2`:** The arm moves correctly but the service
-  reports failure. This is a return code handling issue in `swiftpro_hardware` —
-  the uarm API `set_position` return value is not being interpreted correctly.
-  Under investigation.
-
 ---
 
 ## Host Environment Requirements
 
-### Rootless Podman — `userns_mode: keep-id` on Fedora 43
+### Rootless Podman — `userns_mode: keep-id` on Fedora 44
 
 The development container uses `userns_mode: keep-id` so that build artifacts are
-owned by the host user rather than root. On Fedora 43 with Podman 5.x,
+owned by the host user rather than root. On Fedora 44 with Podman 5.x,
 `--userns=keep-id` hangs at container start unless `fuse-overlayfs` is explicitly
 configured as the storage mount program.
 
@@ -384,13 +391,13 @@ sudo dnf install fuse-overlayfs   # if missing
 ## Hardware Notes
 
 - **Connection:** USB serial `/dev/ttyACM0` at 115200 baud
-- **Firmware:** V4.9.1-jss.5 (custom fork of UFactory V4.9.1)
+- **Firmware:** `SwiftPro-plusplus` 5.0.0-pp.1, API 4.0.5. Protocol: libswiftpro `docs/protocol.md`
 - **Servos:** 3 driven servos (base rotation, shoulder, elbow)
 - **Parallel linkage:** Two four-bar loops keep the end effector level regardless
   of arm elevation. Modelled in URDF via `<mimic>` joints.
 - **Coordinate system:** X forward, Y left, Z up. Units: millimetres for position
-  commands (uarm API), metres for ROS2 topics.
+  commands and `/swiftpro/position`.
 - **Safe home position:** `x=200mm, y=0mm, z=150mm` — used by the Reset service.
 - **Teach mode:** Servos can be detached via `M2019` (all) or `M2202 N<id>` (single)
   allowing the arm to be moved by hand while encoders continue reporting position.
-  Re-attach with `M17`. See libuarm examples for a complete teach/record workflow.
+  Re-attach with `M17`. See libswiftpro examples for a complete teach/record workflow.

@@ -1,262 +1,166 @@
 // kinematics.hpp
-// Copyright 2025 Jack Sidman Smith
+// Copyright 2026 Jack Sidman Smith
 // Licensed under the MIT License. See LICENSE in project root.
 //
 // Analytical FK/IK for the UArm Swift Pro.
 // Header-only — include directly, no linking required.
 //
+// Matches the SwiftPro-plusplus firmware (src/kin.cpp, src/kin.h), so results
+// agree with M2220/M2221/M2222. The firmware remains the authority: it checks
+// every move itself.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 // MODEL SUMMARY
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// The parallel linkage decouples the forearm world angle from J2.
-// Forearm world angle depends ONLY on J3.
+//   elbow:  r = SHOULDER_R + L1·cos(left)      z = SH_Z + L1·sin(left)
+//   wrist:  r = elbow_r    + L2·cos(right)     z = elbow_z - L2·sin(right)
+//   tip:    r = wrist_r    + DX                z = wrist_z - DZ
 //
-//   shoulder:  r = SHOULDER_R,  z = SH_Z
-//   elbow:     r = SHOULDER_R + L1·cos(J2°)
-//              z = SH_Z       + L1·sin(J2°)
-//   J8 pivot:  r = elbow_r + L2·cos(-J3°)
-//              z = elbow_z + L2·sin(-J3°)
-//   tip:       r = J8_r + DX
-//              z = J8_z - DZ
+// DX, DZ are the firmware's defaults for mode 0 (no effector-specific offsets).
 //
-// Firmware angle conventions (degrees, zero offsets):
-//   J1: 90° = arm pointing along +X. azimuth = J1 - 90°.
-//   J2: upper arm angle above horizontal. 0° = horizontal, 90° = vertical.
-//   J3: forearm downward angle. 0° = horizontal, +° = tip moves down.
-//
-// Calibrated from 16-point commanded sweep, RMS = 0.27mm.
+// Angle conventions (degrees), the "user" frame of P2200 and G2206:
+//   base : 90° = straight ahead (+X). azimuth = base - 90°.
+//          /joint_states and @3 use base - 90° instead: 0 = straight ahead.
+//   left : lower arm above horizontal.
+//   right: upper arm below horizontal.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // USAGE
 // ─────────────────────────────────────────────────────────────────────────────
 //
-//   #include "swiftpro_resources/kinematics.hpp"
+//   #include "swiftpro_kinematics/kinematics.hpp"
 //   using namespace swiftpro::kinematics;
 //
 //   // FK
 //   double x, y, z;
-//   fk(j1_deg, j2_deg, j3_deg, x, y, z);
+//   fk(base_deg, left_deg, right_deg, x, y, z);
 //
 //   // IK
-//   double j1, j2, j3;
+//   double base, left, right;
 //   std::string msg;
-//   if (!ik(x, y, z, j1, j2, j3, msg)) { /* handle error */ }
+//   if (!ik(x, y, z, base, left, right, msg)) { /* handle error */ }
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
 namespace swiftpro::kinematics {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Calibrated constants
+// Firmware constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-inline constexpr double L1         = 143.00;  // mm  upper arm (shoulder→elbow)
-inline constexpr double L2         = 158.45;  // mm  forearm (elbow→J8 pivot)
-inline constexpr double SH_Z       = 115.50;  // mm  shoulder pivot above table
-inline constexpr double SHOULDER_R =  13.20;  // mm  shoulder pivot fwd of J1
-inline constexpr double DX         =  56.78;  // mm  J8→tip, horizontal
-inline constexpr double DZ         =  84.45;  // mm  J8→tip, vertical down
+inline constexpr double L1         = 142.07;  // mm  lower arm
+inline constexpr double L2         = 158.81;  // mm  upper arm
+inline constexpr double SH_Z       = 107.40;  // mm  shoulder above the arm-frame origin
+inline constexpr double SHOULDER_R =  13.20;  // mm  shoulder from the base axis
+inline constexpr double DX         =  56.65;  // mm  wrist to tip, horizontal
+inline constexpr double DZ         =  74.55;  // mm  wrist to tip, vertical down
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Workspace limits (firmware degrees / mm)
+// Joint limits (degrees, user frame)
 // ─────────────────────────────────────────────────────────────────────────────
 
-inline constexpr double J1_MIN    =  15.0;
-inline constexpr double J1_MAX    = 165.0;
-inline constexpr double J2_MIN    =  20.0;
-inline constexpr double J2_MAX    = 120.0;
-inline constexpr double J3_MIN    =   0.0;
-inline constexpr double J3_MAX    =  70.0;
-inline constexpr double REACH_MIN = 133.0;   // mm from J1 axis
-inline constexpr double REACH_MAX = 340.0;   // mm from J1 axis
-inline constexpr double Z_MIN     =  5.0;   // mm safety floor
-inline constexpr double Z_MAX     = 250.0;   // mm
+inline constexpr double BASE_MIN = -5.0;
+inline constexpr double BASE_MAX = 185.0;
+inline constexpr double LEFT_MIN = -13.8;
+inline constexpr double LEFT_MAX = 135.6;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Linkage self-collision constraints (empirically calibrated)
-// ─────────────────────────────────────────────────────────────────────────────
-// Two independent constraints must both be satisfied:
-//   1. J3 ≥ (90 - J2) * 0.43  — upper arm vs parallel linkage connector clash
-//   2. J2 + J3 ≥ 52°          — elbow over-centre (linkage past 180°)
-// Use j3_safe_min() to query the effective minimum J3 for a given J2.
+// right's range depends on left: straight lines between these points, in tenths
+// of a degree, at left = TABLE_LEFT_0 + i * TABLE_STEP.
+inline constexpr double TABLE_LEFT_0 = -15.0;
+inline constexpr double TABLE_STEP   = 5.0;
+inline constexpr int    TABLE_POINTS = 32;
+inline constexpr int    RIGHT_TABLE[TABLE_POINTS][2] = {
+    {560, 1120},  {510, 1120},  {460, 1120},  {410, 1120},  {360, 1120},  {310, 1120},  {260, 1120},  // -15..15
+    {210, 1120},  {160, 1110},  {110, 1100},  {60, 1090},   {10, 1080},   {-40, 1060},  {-80, 1040},  // 20..50
+    {-120, 1020}, {-160, 1000}, {-180, 980},  {-180, 940},  {-180, 900},  {-180, 860},  {-180, 820},  // 55..85
+    {-180, 780},  {-180, 730},  {-180, 680},  {-180, 630},  {-180, 580},  {-180, 530},  {-180, 480},  // 90..120
+    {-180, 430},  {-180, 380},  {-180, 330},  {-180, 280},                                            // 125..140
+};
 
-inline constexpr double CLASH_SLOPE    = 0.43;  // J3_min = (90 - J2) * slope
-inline constexpr double ELBOW_SUM_MIN  = 52.0;  // J2 + J3 must exceed this
-
-inline double j3_safe_min(double j2_deg)
+inline void right_limits(double left_deg, double& lo, double& hi)
 {
-    const double c1 = (90.0 - j2_deg) * CLASH_SLOPE;
-    const double c2 = ELBOW_SUM_MIN - j2_deg;
-    return std::max({0.0, c1, c2});
-}
-
-// Returns true if (J2, J3) is in the safe zone.
-inline bool joints_safe(double j2_deg, double j3_deg)
-{
-    return j3_deg >= j3_safe_min(j2_deg);
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward kinematics — 2D (vertical plane)
-// ─────────────────────────────────────────────────────────────────────────────
-// Returns tip_r (horizontal reach from J1 axis) and tip_z (height above table).
-
-inline void fk_2d(double j2_deg, double j3_deg,
-                  double& tip_r,  double& tip_z)
-{
-    const double a2 = j2_deg * (M_PI / 180.0);
-    const double fw = -j3_deg * (M_PI / 180.0);
-
-    const double el_r = SHOULDER_R + L1 * std::cos(a2);
-    const double el_z = SH_Z       + L1 * std::sin(a2);
-
-    const double j8_r = el_r + L2 * std::cos(fw);
-    const double j8_z = el_z + L2 * std::sin(fw);
-
-    tip_r = j8_r + DX;
-    tip_z = j8_z - DZ;
+    const double pos = std::clamp((left_deg - TABLE_LEFT_0) / TABLE_STEP,
+                                  0.0, static_cast<double>(TABLE_POINTS - 1));
+    const int    i   = std::min(static_cast<int>(pos), TABLE_POINTS - 2);
+    const double t   = pos - i;
+    lo = 0.1 * (RIGHT_TABLE[i][0] + (RIGHT_TABLE[i + 1][0] - RIGHT_TABLE[i][0]) * t);
+    hi = 0.1 * (RIGHT_TABLE[i][1] + (RIGHT_TABLE[i + 1][1] - RIGHT_TABLE[i][1]) * t);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Forward kinematics — 3D (firmware frame)
+// Forward kinematics
 // ─────────────────────────────────────────────────────────────────────────────
 
-inline void fk(double j1_deg, double j2_deg, double j3_deg,
-               double& x,     double& y,     double& z)
+inline void fk(double base_deg, double left_deg, double right_deg,
+               double& x,       double& y,       double& z)
 {
-    double tip_r, tip_z;
-    fk_2d(j2_deg, j3_deg, tip_r, tip_z);
+    constexpr double DEG = M_PI / 180.0;
 
-    const double az = (j1_deg - 90.0) * (M_PI / 180.0);
-    x = tip_r * std::cos(az);
-    y = tip_r * std::sin(az);
-    z = tip_z;
+    const double r  = SHOULDER_R + L1 * std::cos(left_deg * DEG)
+                    + L2 * std::cos(right_deg * DEG) + DX;
+    const double az = (base_deg - 90.0) * DEG;
+
+    x = r * std::cos(az);
+    y = r * std::sin(az);
+    z = SH_Z + L1 * std::sin(left_deg * DEG) - L2 * std::sin(right_deg * DEG) - DZ;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inverse kinematics — 3D (firmware frame)
+// Inverse kinematics
 // ─────────────────────────────────────────────────────────────────────────────
-// Returns false if target is outside the reachable workspace.
-// msg is set to a human-readable description on failure, "OK" on success.
+// Elbow-up solution, as in the firmware. Returns false if the target is outside
+// the joint limits. msg is a human-readable description on failure, "OK" on
+// success.
 
-inline bool ik(double x,       double y,       double z,
-               double& j1_deg, double& j2_deg, double& j3_deg,
+inline bool ik(double x,         double y,         double z,
+               double& base_deg, double& left_deg, double& right_deg,
                std::string& msg)
 {
     constexpr double RAD = 180.0 / M_PI;
-    constexpr double DEG = M_PI / 180.0;
 
-    // ── J1: azimuth ──────────────────────────────────────────────────────────
-    j1_deg = 90.0 + std::atan2(y, x) * RAD;
+    const double heading = std::atan2(y, x);
+    base_deg = 90.0 + heading * RAD;
 
-    if (j1_deg < J1_MIN || j1_deg > J1_MAX) {
-        msg = "J1 out of range: " + std::to_string(j1_deg) + "deg";
+    if (base_deg < BASE_MIN || base_deg > BASE_MAX) {
+        msg = "Base out of range: " + std::to_string(base_deg) + "deg";
         return false;
     }
 
-    // ── Reach and Z limits ───────────────────────────────────────────────────
-    const double tip_r = std::sqrt(x*x + y*y);
+    // Planar problem in the arm's vertical plane, relative to the shoulder.
+    const double s  = std::hypot(x, y) - DX - SHOULDER_R;
+    const double h  = z + DZ - SH_Z;
+    const double d2 = s*s + h*h;
+    const double d  = std::sqrt(d2);
 
-    if (tip_r < REACH_MIN) {
-        msg = "Too close: reach=" + std::to_string(tip_r)
-            + "mm (min=" + std::to_string(REACH_MIN) + "mm)";
-        return false;
-    }
-    if (tip_r > REACH_MAX) {
-        msg = "Too far: reach=" + std::to_string(tip_r)
-            + "mm (max=" + std::to_string(REACH_MAX) + "mm)";
-        return false;
-    }
-    if (z < Z_MIN) {
-        msg = "Below safety floor: z=" + std::to_string(z)
-            + "mm (min=" + std::to_string(Z_MIN) + "mm)";
-        return false;
-    }
-    if (z > Z_MAX) {
-        msg = "Too high: z=" + std::to_string(z)
-            + "mm (max=" + std::to_string(Z_MAX) + "mm)";
-        return false;
-    }
-
-    // ── 2D IK ────────────────────────────────────────────────────────────────
-    //
-    // R = tip_r - DX - SHOULDER_R  = L1·cos(J2) + L2·cos(J3)
-    // H = tip_z + DZ - SH_Z        = L1·sin(J2) - L2·sin(J3)
-    //
-    // Eliminate J2 by squaring and adding:
-    //   L1² = (R - L2·cos(J3))² + (H + L2·sin(J3))²
-    //
-    // Rearrange to A·cos(J3) + B·sin(J3) = C:
-    //   A =  2·R·L2
-    //   B = -2·H·L2
-    //   C =  R² + H² + L2² - L1²
-    //
-    // Solve: J3 = -(atan2(-B, A) ± acos(C / sqrt(A²+B²)))
-
-    const double R = tip_r - DX - SHOULDER_R;
-    const double H = z     + DZ - SH_Z;
-
-    const double A = 2.0 * R * L2;
-    const double B = -2.0 * H * L2;
-    const double C = R*R + H*H + L2*L2 - L1*L1;
-    const double M = std::sqrt(A*A + B*B);
-
-    if (M < 1e-9) {
-        msg = "Degenerate IK — target on J1 axis";
-        return false;
-    }
-
-    const double ratio = C / M;
+    const double ratio = (d > 0.0) ? (L1*L1 + d2 - L2*L2) / (2.0 * L1 * d) : 2.0;
     if (std::abs(ratio) > 1.0) {
         msg = "Unreachable — no IK solution exists";
         return false;
     }
 
-    const double base  = std::atan2(-B, A);
-    const double delta = std::acos(ratio);
+    const double left = std::atan2(h, s) + std::acos(ratio);
+    left_deg  = left * RAD;
+    right_deg = std::atan2(-(h - L1 * std::sin(left)), s - L1 * std::cos(left)) * RAD;
 
-    const double j3_a = -(base + delta) * RAD;
-    const double j3_b = -(base - delta) * RAD;
-
-    const bool a_ok = (j3_a >= J3_MIN && j3_a <= J3_MAX);
-    const bool b_ok = (j3_b >= J3_MIN && j3_b <= J3_MAX);
-
-    if (!a_ok && !b_ok) {
-        msg = "No solution within J3 limits ["
-            + std::to_string(J3_MIN) + ", " + std::to_string(J3_MAX)
-            + "]. Candidates: " + std::to_string(j3_a)
-            + ", " + std::to_string(j3_b);
+    if (left_deg < LEFT_MIN || left_deg > LEFT_MAX) {
+        msg = "Left out of range: " + std::to_string(left_deg) + "deg";
         return false;
     }
 
-    // Prefer smaller J3 (less elbow bend = more stable pose)
-    if (a_ok && b_ok)
-        j3_deg = (std::abs(j3_a) <= std::abs(j3_b)) ? j3_a : j3_b;
-    else
-        j3_deg = a_ok ? j3_a : j3_b;
-
-    // Recover J2 from known J3
-    const double j3_rad = j3_deg * DEG;
-    j2_deg = std::atan2(H + L2 * std::sin(j3_rad),
-                        R - L2 * std::cos(j3_rad)) * RAD;
-
-    if (j2_deg < J2_MIN || j2_deg > J2_MAX) {
-        msg = "J2 out of range: " + std::to_string(j2_deg) + "deg";
+    double lo = 0.0, hi = 0.0;
+    right_limits(left_deg, lo, hi);
+    if (right_deg < lo || right_deg > hi) {
+        msg = "Right out of range: " + std::to_string(right_deg)
+            + "deg at left=" + std::to_string(left_deg)
+            + "deg (" + std::to_string(lo) + " to " + std::to_string(hi) + ")";
         return false;
     }
-    // ── Linkage self-collision check ─────────────────────────────────────────
-    if (!joints_safe(j2_deg, j3_deg)) {
-        msg = "Solution violates linkage constraints: J2=" + std::to_string(j2_deg)
-            + " J3=" + std::to_string(j3_deg)
-            + " (J3_min=" + std::to_string(j3_safe_min(j2_deg)) + ")";
-        return false;
-    }
-    
+
     msg = "OK";
     return true;
 }

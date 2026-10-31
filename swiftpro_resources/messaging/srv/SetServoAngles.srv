@@ -1,6 +1,6 @@
-float32 j1   # degrees; -1.0 = leave unchanged
+float32 j1   # base, degrees; 90 = straight ahead
 float32 j2
 float32 j3
-float32 speed     # 0 = use default (10000)
+float32 speed     # F, 1 F = 80 deg/min of joint-space speed; must be > 0
 ---
 bool success
