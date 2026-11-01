@@ -298,49 +298,38 @@ docker-compose -f docker-compose.dev.yml up -d
 # On the worker — ensure registry is running
 systemctl status registry
 
-# Build and push the runtime image (NF_08)
+# Build and push the runtime image
 podman build --format docker \
   -f Dockerfile.runtime \
-  -t worker:5000/swiftpro_hardware:latest .
-podman push --tls-verify=false worker:5000/swiftpro_hardware:latest
-
-# On the worker — pull the runtime image
-podman pull --tls-verify=false localhost:5000/swiftpro_hardware:latest
+  -t localhost:5000/swiftros2_runtime:latest .
+podman push --tls-verify=false localhost:5000/swiftros2_runtime:latest \
+  worker:5000/swiftros2_runtime:latest
 ```
 
 ### Normal development cycle
 
 ```
 Edit code on NUC
-    → NF_04  colcon build in dev container
-    → NF_06  rsync install/ + entrypoint.sh + docker-compose.runtime.yml to worker
-    → NF_07  restart runtime container on worker
+    → colcon build in dev container
+    → rsync install/ + entrypoint.sh + docker-compose.runtime.yml to worker
+    → restart runtime container on worker
 ```
 
-Full image rebuild (NF_08) only when system-level dependencies change.
-
-### IDE menu reference
-
-| Entry | Action |
-|---|---|
-| SwiftRos2 - Build | colcon build inside dev container |
-| SwiftRos2 - Clean | remove build/ install/ log/ |
-| SwiftRos2 - Deploy to worker | rsync artifacts + scripts to worker |
-| SwiftRos2 - Restart on worker | restart runtime container via SSH |
-| SwiftRos2 - Build+Push runtime image | rebuild runtime image, push to registry |
+Rebuild the image only when system-level dependencies change. `DEPLOYMENT.md` has
+the exact commands.
 
 ---
 
 ## Running on the Worker
 
 ```bash
-# Start via compose (after NF_06 + NF_07, or manually)
-cd /opt/swiftpro
-docker-compose -f docker-compose.runtime.yml up -d
+cd /opt/swiftros2
+sudo env DOCKER_HOST=unix:///run/podman/podman.sock \
+  docker-compose -f docker-compose.runtime.yml up -d --force-recreate
 
 # Check it is running
-podman ps | grep swiftpro_hardware
-podman logs swiftpro_hardware
+sudo podman ps | grep swiftros2_runtime
+sudo podman logs swiftros2_runtime
 ```
 
 ---
@@ -350,7 +339,7 @@ podman logs swiftpro_hardware
 - **Podman SHELL warning during image build:** `SHELL` is not supported in OCI image
   format. The warning is cosmetic. Root cause: `podman-compose` 1.5.0 does not pass
   `--format docker` to `podman build`. Workaround: build images directly with
-  `podman build --format docker` (NF_08).
+  `podman build --format docker`.
 
 - **`ulimits` not permitted on NUC:** The dev compose omits `ulimits` because the
   NUC kernel does not permit `RLIMIT_RTPRIO` for non-privileged containers. The

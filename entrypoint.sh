@@ -10,7 +10,7 @@ source /opt/ros/jazzy/setup.bash
 
 if [ ! -f /opt/swiftros2/install/setup.bash ]; then
     echo "ERROR: /opt/swiftros2/install/setup.bash not found." >&2
-    echo "  Have you run NF_06 (rsync) to deploy the built artifacts?" >&2
+    echo "  Have you rsynced the built artifacts to worker? See DEPLOYMENT.md." >&2
     exit 1
 fi
 
