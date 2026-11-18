@@ -11,6 +11,8 @@ services:
       ROS_DOMAIN_ID: 11
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       SWIFTPRO_PORT: /dev/ttyACM0
+      SWIFTPRO_Z_MIN: "-11.0"   # lying tiles: table is at about z -3 to -12
+      SWIFTPRO_STATUS_HZ: "5.0" # pump_status fresh enough to detect a grip while lowering
     entrypoint: ["/opt/swiftros2/entrypoint.sh"]
     restart: unless-stopped
     

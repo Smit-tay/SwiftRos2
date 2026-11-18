@@ -24,7 +24,8 @@ trap term_handler TERM
 trap term_handler INT
 
 ros2 run swiftpro_hardware swiftpro_hardware \
-    --ros-args -p port:=${SWIFTPRO_PORT} &
+    --ros-args -p port:=${SWIFTPRO_PORT} -p z_min:=${SWIFTPRO_Z_MIN:-5.0} \
+    -p status_poll_rate:=${SWIFTPRO_STATUS_HZ:-1.0} &
 HARDWARE_PID=$!
 
 ros2 run swiftpro_kinematics swiftpro_kinematics &
